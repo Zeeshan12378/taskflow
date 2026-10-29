@@ -768,6 +768,110 @@ class TasksTest extends TestCase
         $this->assertDatabaseHas('tasks', ['id' => $task->id, 'project_status_id' => $targetStatus->id]);
     }
 
+    public function test_board_quick_add_creates_task_in_selected_column_and_records_activity(): void
+    {
+        $user = User::factory()->create();
+        $project = $this->createProject($user);
+        $status = $project->statuses()->where('name', 'To Do')->firstOrFail();
+
+        Livewire::actingAs($user)
+            ->test('projects.board', ['project' => $project->id])
+            ->call('startQuickAddTask', $status->id)
+            ->set('quickAddTitle', 'Write release notes')
+            ->call('createQuickTask', $status->id)
+            ->assertHasNoErrors()
+            ->assertSee('Task created in To Do.');
+
+        $task = $project->tasks()->where('title', 'Write release notes')->firstOrFail();
+        $this->assertSame($status->id, $task->project_status_id);
+        $this->assertSame($user->id, $task->user_id);
+        $this->assertDatabaseHas('task_activities', [
+            'task_id' => $task->id,
+            'actor_id' => $user->id,
+            'action' => 'created',
+        ]);
+    }
+
+    public function test_board_quick_add_requires_a_title(): void
+    {
+        $user = User::factory()->create();
+        $project = $this->createProject($user);
+        $status = $project->statuses()->where('name', 'To Do')->firstOrFail();
+
+        Livewire::actingAs($user)
+            ->test('projects.board', ['project' => $project->id])
+            ->call('startQuickAddTask', $status->id)
+            ->set('quickAddTitle', '   ')
+            ->call('createQuickTask', $status->id)
+            ->assertHasErrors(['quickAddTitle' => 'required']);
+
+        $this->assertDatabaseMissing('tasks', [
+            'project_id' => $project->id,
+            'title' => '',
+        ]);
+    }
+
+    public function test_board_quick_add_rejects_a_status_from_another_project(): void
+    {
+        $user = User::factory()->create();
+        $project = $this->createProject($user);
+        $otherProject = $this->createProject($user, 'Other project');
+        $foreignStatus = $otherProject->statuses()->where('name', 'To Do')->firstOrFail();
+
+        Livewire::actingAs($user)
+            ->test('projects.board', ['project' => $project->id])
+            ->set('quickAddTitle', 'Out of scope')
+            ->call('createQuickTask', $foreignStatus->id)
+            ->assertNotFound();
+
+        $this->assertDatabaseMissing('tasks', [
+            'project_id' => $project->id,
+            'title' => 'Out of scope',
+        ]);
+        $this->assertDatabaseMissing('tasks', [
+            'project_id' => $otherProject->id,
+            'title' => 'Out of scope',
+        ]);
+    }
+
+    public function test_board_quick_add_requires_reviewer_for_review_status(): void
+    {
+        $user = User::factory()->create();
+        $project = $this->createProject($user);
+        $status = $project->statuses()->where('name', 'Verify')->firstOrFail();
+
+        Livewire::actingAs($user)
+            ->test('projects.board', ['project' => $project->id])
+            ->call('startQuickAddTask', $status->id)
+            ->set('quickAddTitle', 'Review the patch')
+            ->call('createQuickTask', $status->id)
+            ->assertSee('Use the full task form to assign a reviewer before creating a task in Verify.');
+
+        $this->assertDatabaseMissing('tasks', [
+            'project_id' => $project->id,
+            'title' => 'Review the patch',
+        ]);
+    }
+
+    public function test_board_quick_add_requires_a_reason_for_blocked_status(): void
+    {
+        $user = User::factory()->create();
+        $project = $this->createProject($user);
+        $status = $project->statuses()->whereRaw('lower(name) = ?', ['blocked'])->firstOrFail();
+
+        Livewire::actingAs($user)
+            ->test('projects.board', ['project' => $project->id])
+            ->call('startQuickAddTask', $status->id)
+            ->set('quickAddTitle', 'Investigate outage')
+            ->call('createQuickTask', $status->id)
+            ->assertSee('Use the full task form to add a blocked reason before creating a task in this column.');
+
+        $this->assertDatabaseMissing('tasks', [
+            'project_id' => $project->id,
+            'title' => 'Investigate outage',
+        ]);
+    }
+
     public function test_task_must_have_a_project_reviewer_before_entering_verify(): void
     {
         $user = User::factory()->create();

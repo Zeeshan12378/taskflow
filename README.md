@@ -13,6 +13,7 @@ For an AI-oriented architecture and continuation guide, read [docs/AI_HANDOFF.md
 - Task types (`task`, `bug`, `feature`), priorities (`low`, `medium`, `high`, `urgent`), due dates, blocked reasons, assignees, reviewers, and story point estimates on the Fibonacci scale (1–21).
 - Optional HTTPS GitHub references on tasks, restricted to `github.com` URLs and recorded in task activity.
 - Board search and filters for workflow status, type, priority, due dates, date ranges, assignee, reviewer, reporter, sprint, and blocked tasks.
+- Jira-style quick task creation at the bottom of each board column; review and blocked columns use the full form when reviewer or blocked-reason details are required.
 - Task detail modal with inline field editing, comments, activity history, and in-app notifications for task events.
 - Tasks support optional checklists with up to 30 items, completion tracking, and checklist progress in task activity. Saved project templates and weekly recurring tasks preserve checklist steps while starting each new task with all steps incomplete.
 - Project managers can create weekly recurring task schedules from saved project templates. Each scheduled task is due on its occurrence date; schedules can be paused, resumed, or deleted. Configure the host to run `php artisan schedule:run` every minute for recurring tasks to be generated.

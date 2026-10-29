@@ -53,6 +53,10 @@ new #[Layout('layouts.app')] #[Title('Project board · TaskFlow')] class extends
 
     public string $statusMessageType = 'success';
 
+    public ?int $quickAddStatusId = null;
+
+    public string $quickAddTitle = '';
+
     public function mount(int $project): void
     {
         $record = Project::query()->accessibleTo(auth()->user())->findOrFail($project);
@@ -261,6 +265,63 @@ new #[Layout('layouts.app')] #[Title('Project board · TaskFlow')] class extends
         }
     }
 
+    public function startQuickAddTask(int $statusId): void
+    {
+        $project = $this->ownedProject();
+        $this->authorize('create', [Task::class, $project]);
+        $project->statuses()->findOrFail($statusId);
+
+        $this->quickAddStatusId = $statusId;
+        $this->quickAddTitle = '';
+        $this->resetValidation('quickAddTitle');
+        $this->statusMessage = null;
+    }
+
+    public function createQuickTask(int $statusId): void
+    {
+        $project = $this->ownedProject();
+        $this->authorize('create', [Task::class, $project]);
+        $status = $project->statuses()->findOrFail($statusId);
+        $this->quickAddTitle = trim($this->quickAddTitle);
+        $validated = $this->validate([
+            'quickAddTitle' => ['required', 'string', 'max:180'],
+        ]);
+
+        if ($status->requiresReviewer()) {
+            $this->feedback('Use the full task form to assign a reviewer before creating a task in '.$status->name.'.', 'error');
+
+            return;
+        }
+
+        if (strtolower(trim($status->name)) === 'blocked') {
+            $this->feedback('Use the full task form to add a blocked reason before creating a task in this column.', 'error');
+
+            return;
+        }
+
+        DB::transaction(fn () => $project->tasks()->create([
+            'user_id' => auth()->id(),
+            'project_status_id' => $status->id,
+            'title' => $validated['quickAddTitle'],
+            'type' => 'task',
+            'priority' => 'medium',
+        ]));
+
+        $this->quickAddStatusId = null;
+        $this->quickAddTitle = '';
+        $this->resetValidation('quickAddTitle');
+        $this->feedback('Task created in '.$status->name.'.');
+        unset($this->tasksByStatus);
+    }
+
+    public function cancelQuickAddTask(): void
+    {
+        $this->quickAddStatusId = null;
+        $this->quickAddTitle = '';
+        $this->resetValidation('quickAddTitle');
+        $this->statusMessage = null;
+    }
+
     public function deleteTask(int $taskId): void
     {
         $project = Project::query()->accessibleTo(auth()->user())->findOrFail($this->projectId);
@@ -467,6 +528,44 @@ new #[Layout('layouts.app')] #[Title('Project board · TaskFlow')] class extends
                         </div>
                     @endforelse
                 </div>
+
+                @if ($quickAddStatusId === $status->id)
+                    <form
+                        wire:submit="createQuickTask({{ $status->id }})"
+                        x-data
+                        x-init="$nextTick(() => $el.querySelector('input')?.focus())"
+                        x-on:keydown.escape="$wire.cancelQuickAddTask()"
+                        class="mt-3 rounded-lg border border-indigo-300 bg-white p-3 shadow-sm dark:border-indigo-800 dark:bg-slate-950"
+                    >
+                        <label for="quick-add-title-{{ $status->id }}" class="sr-only">New task title for {{ $status->name }}</label>
+                        <input
+                            id="quick-add-title-{{ $status->id }}"
+                            type="text"
+                            wire:model="quickAddTitle"
+                            maxlength="180"
+                            placeholder="What needs to be done?"
+                            aria-describedby="quick-add-help-{{ $status->id }}"
+                            @error('quickAddTitle') aria-invalid="true" @enderror
+                            class="block min-h-10 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none placeholder:text-slate-400 focus:border-indigo-600 focus:ring-4 focus:ring-indigo-600/10 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                        >
+                        @error('quickAddTitle') <p class="mt-1 text-xs text-red-600 dark:text-red-400">{{ $message }}</p> @enderror
+                        <p id="quick-add-help-{{ $status->id }}" class="mt-2 text-[11px] text-slate-500 dark:text-slate-400">Press Enter to add · Esc to cancel</p>
+                        <div class="mt-2 flex justify-end gap-2">
+                            <button type="button" wire:click="cancelQuickAddTask" class="rounded-md px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800">Cancel</button>
+                            <button type="submit" wire:loading.attr="disabled" wire:target="createQuickTask" class="rounded-md bg-indigo-600 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60">Add task</button>
+                        </div>
+                    </form>
+                @else
+                    <button
+                        type="button"
+                        wire:click="startQuickAddTask({{ $status->id }})"
+                        aria-label="Add task to {{ $status->name }}"
+                        class="mt-3 inline-flex min-h-10 w-full items-center justify-start gap-2 rounded-lg border border-dashed border-slate-300 px-3 text-sm font-medium text-slate-500 transition hover:border-indigo-300 hover:bg-white hover:text-indigo-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 dark:border-slate-700 dark:text-slate-400 dark:hover:border-indigo-800 dark:hover:bg-slate-950 dark:hover:text-indigo-300"
+                    >
+                        <span class="text-lg leading-none" aria-hidden="true">+</span>
+                        Add a task
+                    </button>
+                @endif
             </section>
         @endforeach
     </div>
