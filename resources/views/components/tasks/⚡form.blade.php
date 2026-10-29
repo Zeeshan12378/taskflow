@@ -34,6 +34,8 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
 
     public string $dueDate = '';
 
+    public string $githubUrl = '';
+
     public string $assigneeId = '';
 
     public string $reviewerId = '';
@@ -166,6 +168,7 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
         $this->type = $taskRecord->type;
         $this->blockedReason = $taskRecord->blocked_reason ?? '';
         $this->dueDate = $taskRecord->due_date?->format('Y-m-d') ?? '';
+        $this->githubUrl = $taskRecord->github_url ?? '';
         $this->assigneeId = (string) ($taskRecord->assignee_id ?? '');
         $this->reviewerId = (string) ($taskRecord->reviewer_id ?? '');
         $this->cycleId = (string) ($taskRecord->cycle_id ?? '');
@@ -226,7 +229,7 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
 
     public function editDetailField(string $field): void
     {
-        abort_unless(in_array($field, ['type', 'statusId', 'priority', 'dueDate', 'assigneeId', 'reviewerId', 'cycleId', 'storyPoints', 'blockedReason'], true), 404);
+        abort_unless(in_array($field, ['type', 'statusId', 'priority', 'dueDate', 'githubUrl', 'assigneeId', 'reviewerId', 'cycleId', 'storyPoints', 'blockedReason'], true), 404);
         $task = $this->task;
         abort_if($task === null, 404);
         $this->authorize('update', $task);
@@ -236,7 +239,7 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
 
     public function cancelDetailField(string $field): void
     {
-        abort_unless(in_array($field, ['type', 'statusId', 'priority', 'dueDate', 'assigneeId', 'reviewerId', 'cycleId', 'storyPoints', 'blockedReason'], true), 404);
+        abort_unless(in_array($field, ['type', 'statusId', 'priority', 'dueDate', 'githubUrl', 'assigneeId', 'reviewerId', 'cycleId', 'storyPoints', 'blockedReason'], true), 404);
         $task = $this->task;
         abort_if($task === null, 404);
         $this->authorize('update', $task);
@@ -246,6 +249,7 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
             'statusId' => (string) $task->project_status_id,
             'priority' => $task->priority,
             'dueDate' => $task->due_date?->format('Y-m-d') ?? '',
+            'githubUrl' => $task->github_url ?? '',
             'assigneeId' => (string) ($task->assignee_id ?? ''),
             'reviewerId' => (string) ($task->reviewer_id ?? ''),
             'cycleId' => (string) ($task->cycle_id ?? ''),
@@ -258,7 +262,7 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
 
     public function saveDetailField(string $field): void
     {
-        abort_unless(in_array($field, ['type', 'statusId', 'priority', 'dueDate', 'assigneeId', 'reviewerId', 'cycleId', 'storyPoints', 'blockedReason'], true), 404);
+        abort_unless(in_array($field, ['type', 'statusId', 'priority', 'dueDate', 'githubUrl', 'assigneeId', 'reviewerId', 'cycleId', 'storyPoints', 'blockedReason'], true), 404);
         $task = $this->task;
         abort_if($task === null, 404);
         $this->authorize('update', $task);
@@ -273,6 +277,7 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
             'statusId' => ['statusId' => ['required', 'integer', Rule::exists('project_statuses', 'id')->where('project_id', $project->id)]],
             'priority' => ['priority' => ['required', Rule::in(Task::PRIORITIES)]],
             'dueDate' => ['dueDate' => ['nullable', 'date']],
+            'githubUrl' => ['githubUrl' => $this->githubUrlRules()],
             'assigneeId' => ['assigneeId' => ['nullable', 'integer', Rule::in($project->accessibleMemberIds())]],
             'reviewerId' => ['reviewerId' => [$currentStatus?->requiresReviewer() ? 'required' : 'nullable', 'integer', Rule::in($project->accessibleMemberIds())]],
             'cycleId' => ['cycleId' => ['nullable', 'integer', Rule::exists('cycles', 'id')->where('team_id', $project->team_id)->where(fn ($query) => $query->where(fn ($query) => $query->whereIn('status', ['planned', 'active'])->whereDate('end_date', '>=', today()))->orWhere('id', $task->cycle_id ?? 0))]],
@@ -306,6 +311,7 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
         $databaseField = match ($field) {
             'statusId' => 'project_status_id',
             'dueDate' => 'due_date',
+            'githubUrl' => 'github_url',
             'assigneeId' => 'assignee_id',
             'reviewerId' => 'reviewer_id',
             'cycleId' => 'cycle_id',
@@ -314,7 +320,7 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
             default => $field,
         };
         $value = $validated[$field] ?? null;
-        $value = in_array($field, ['assigneeId', 'reviewerId', 'cycleId', 'storyPoints'], true) && blank($value) ? null : $value;
+        $value = in_array($field, ['githubUrl', 'assigneeId', 'reviewerId', 'cycleId', 'storyPoints'], true) && blank($value) ? null : $value;
         $attributes = [$databaseField => $value];
 
         if ($field === 'statusId' && strtolower(trim($status->name)) !== 'blocked') {
@@ -356,6 +362,7 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
             'storyPoints' => ['nullable', 'integer', Rule::in([1, 2, 3, 5, 8, 13, 21])],
             'blockedReason' => [$statusIsBlocked ? 'required' : 'nullable', 'string', 'max:10000'],
             'dueDate' => ['nullable', 'date'],
+            'githubUrl' => $this->githubUrlRules(),
             'assigneeId' => ['nullable', 'integer', Rule::in($project->accessibleMemberIds())],
             'reviewerId' => [$isEnteringReview ? 'required' : 'nullable', 'integer', Rule::in($project->accessibleMemberIds())],
         ];
@@ -393,6 +400,7 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
             'story_points' => blank($validated['storyPoints'] ?? null) ? null : $validated['storyPoints'],
             'blocked_reason' => $statusIsBlocked ? $validated['blockedReason'] : null,
             'due_date' => $validated['dueDate'] ?: null,
+            'github_url' => $validated['githubUrl'] ?: null,
             'assignee_id' => $validated['assigneeId'] ?: null,
             'reviewer_id' => $validated['reviewerId'] ?: null,
         ];
@@ -419,6 +427,31 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
         }
 
         $this->redirectRoute('projects.board', ['project' => $project]);
+    }
+
+    /**
+     * @return array<int, \Closure|string>
+     */
+    private function githubUrlRules(): array
+    {
+        return [
+            'nullable',
+            'string',
+            'max:2048',
+            'url:https',
+            function (string $attribute, mixed $value, \Closure $fail): void {
+                $parts = parse_url($value);
+
+                if (
+                    ! is_array($parts)
+                    || strtolower((string) ($parts['host'] ?? '')) !== 'github.com'
+                    || isset($parts['user'])
+                    || isset($parts['pass'])
+                ) {
+                    $fail('The GitHub reference must be an https://github.com URL.');
+                }
+            },
+        ];
     }
 };
 ?>
@@ -478,6 +511,7 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
                 <div class="grid grid-cols-[6.75rem_minmax(0,1fr)] items-center gap-3 py-3"><dt class="text-sm text-slate-600 dark:text-slate-400">Project</dt><dd class="min-w-0"><a href="{{ route('projects.show', $this->project) }}" wire:navigate class="block truncate px-2 py-1.5 text-sm font-medium text-indigo-600 hover:underline dark:text-indigo-400">{{ $this->project->name }}</a></dd></div>
                 <div class="grid grid-cols-[6.75rem_minmax(0,1fr)] items-center gap-3 py-3"><dt class="text-sm text-slate-600 dark:text-slate-400">Type</dt><dd class="min-w-0">@if ($editingDetailField === 'type')<div class="flex min-w-0 items-center gap-1.5"><select wire:model="type" aria-label="Task type" class="min-w-0 flex-1 rounded-md border border-indigo-300 bg-white px-2 py-1.5 text-sm dark:border-indigo-700 dark:bg-slate-950 dark:text-white"><option value="task">Task</option><option value="bug">Bug</option><option value="feature">Feature</option></select><button type="button" wire:click="saveDetailField('type')" aria-label="Save task type" class="rounded-md bg-indigo-600 px-2 py-1 text-white">✓</button><button type="button" wire:click="cancelDetailField('type')" aria-label="Cancel task type edit" class="rounded-md border border-slate-300 px-2 py-1 text-slate-600 dark:border-slate-700 dark:text-slate-300">×</button></div>@else<button type="button" wire:click="editDetailField('type')" class="w-full rounded-md px-2 py-1.5 text-left text-sm capitalize text-slate-800 hover:bg-slate-50 dark:text-slate-200 dark:hover:bg-slate-800">{{ $this->task->type }}</button>@endif @error('type')<p class="mt-1 text-xs text-red-600">{{ $message }}</p>@enderror</dd></div>
                 <div class="grid grid-cols-[6.75rem_minmax(0,1fr)] items-center gap-3 py-3"><dt class="text-sm text-slate-600 dark:text-slate-400">Due date</dt><dd class="min-w-0">@if ($editingDetailField === 'dueDate')<div class="flex min-w-0 items-center gap-1.5"><input type="date" wire:model="dueDate" aria-label="Task due date" class="min-w-0 flex-1 rounded-md border border-indigo-300 bg-white px-2 py-1.5 text-sm dark:border-indigo-700 dark:bg-slate-950 dark:text-white"><button type="button" wire:click="saveDetailField('dueDate')" aria-label="Save due date" class="rounded-md bg-indigo-600 px-2 py-1 text-white">✓</button><button type="button" wire:click="cancelDetailField('dueDate')" aria-label="Cancel due date edit" class="rounded-md border border-slate-300 px-2 py-1 text-slate-600 dark:border-slate-700 dark:text-slate-300">×</button></div>@else<button type="button" wire:click="editDetailField('dueDate')" class="w-full rounded-md px-2 py-1.5 text-left text-sm text-slate-800 hover:bg-slate-50 dark:text-slate-200 dark:hover:bg-slate-800">{{ $this->task->due_date?->format('M j, Y') ?? 'Add due date' }}</button>@endif @error('dueDate')<p class="mt-1 text-xs text-red-600">{{ $message }}</p>@enderror</dd></div>
+                <div class="grid grid-cols-[6.75rem_minmax(0,1fr)] items-center gap-3 py-3"><dt class="text-sm text-slate-600 dark:text-slate-400">GitHub reference</dt><dd class="min-w-0">@if ($editingDetailField === 'githubUrl')<div class="flex min-w-0 items-center gap-1.5"><input type="url" wire:model="githubUrl" aria-label="GitHub reference URL" placeholder="https://github.com/owner/repo/pull/123" class="min-w-0 flex-1 rounded-md border border-indigo-300 bg-white px-2 py-1.5 text-sm dark:border-indigo-700 dark:bg-slate-950 dark:text-white"><button type="button" wire:click="saveDetailField('githubUrl')" aria-label="Save GitHub reference" class="rounded-md bg-indigo-600 px-2 py-1 text-white">✓</button><button type="button" wire:click="cancelDetailField('githubUrl')" aria-label="Cancel GitHub reference edit" class="rounded-md border border-slate-300 px-2 py-1 text-slate-600 dark:border-slate-700 dark:text-slate-300">×</button></div>@else<div class="flex min-w-0 items-center gap-1">@if ($this->task->github_url)<a href="{{ $this->task->github_url }}" target="_blank" rel="noopener noreferrer" class="min-w-0 flex-1 truncate rounded-md px-2 py-1.5 text-sm text-indigo-600 hover:underline dark:text-indigo-400">{{ $this->task->github_url }}</a>@else<span class="min-w-0 flex-1 truncate px-2 py-1.5 text-sm text-slate-500 dark:text-slate-400">No GitHub reference</span>@endif<button type="button" wire:click="editDetailField('githubUrl')" aria-label="Edit GitHub reference" class="rounded-md px-2 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800">Edit</button></div>@endif @error('githubUrl')<p class="mt-1 text-xs text-red-600">{{ $message }}</p>@enderror</dd></div>
                 <div class="grid grid-cols-[6.75rem_minmax(0,1fr)] items-center gap-3 py-3"><dt class="text-sm text-slate-600 dark:text-slate-400">Reviewer</dt><dd class="min-w-0">@if ($editingDetailField === 'reviewerId')<div class="flex min-w-0 items-center gap-1.5"><select wire:model="reviewerId" aria-label="Task reviewer" class="min-w-0 flex-1 rounded-md border border-indigo-300 bg-white px-2 py-1.5 text-sm dark:border-indigo-700 dark:bg-slate-950 dark:text-white"><option value="">No reviewer</option>@foreach ($this->project->accessibleMembers() as $member)<option value="{{ $member->id }}">{{ $member->name }}</option>@endforeach</select><button type="button" wire:click="saveDetailField('reviewerId')" aria-label="Save reviewer" class="rounded-md bg-indigo-600 px-2 py-1 text-white">✓</button><button type="button" wire:click="cancelDetailField('reviewerId')" aria-label="Cancel reviewer edit" class="rounded-md border border-slate-300 px-2 py-1 text-slate-600 dark:border-slate-700 dark:text-slate-300">×</button></div>@else<button type="button" wire:click="editDetailField('reviewerId')" class="w-full truncate rounded-md px-2 py-1.5 text-left text-sm text-slate-800 hover:bg-slate-50 dark:text-slate-200 dark:hover:bg-slate-800">{{ $this->task->reviewer?->name ?? 'Unassigned' }}</button>@endif @error('reviewerId')<p class="mt-1 text-xs text-red-600">{{ $message }}</p>@enderror</dd></div>
                 <div class="grid grid-cols-[6.75rem_minmax(0,1fr)] items-center gap-3 py-3"><dt class="text-sm text-slate-600 dark:text-slate-400">Reporter</dt><dd class="truncate px-2 py-1.5 text-sm text-slate-800 dark:text-slate-200">{{ $this->task->user?->name ?? 'Former member' }}</dd></div>
                 @if ($this->canAssignCycle)
@@ -553,6 +587,13 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
                 <label for="dueDate" class="block text-sm font-medium text-slate-900 dark:text-slate-200">Due date <span class="font-normal text-slate-500">(optional)</span></label>
                 <input id="dueDate" type="date" wire:model="dueDate" @error('dueDate') aria-describedby="due-date-error" aria-invalid="true" @enderror class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-sm outline-none focus:border-indigo-600 focus:ring-4 focus:ring-indigo-600/10 dark:border-slate-700 dark:bg-slate-950 dark:text-white">
                 @error('dueDate') <p id="due-date-error" class="mt-1.5 text-sm text-red-600 dark:text-red-400">{{ $message }}</p> @enderror
+            </div>
+
+            <div>
+                <label for="githubUrl" class="block text-sm font-medium text-slate-900 dark:text-slate-200">GitHub reference <span class="font-normal text-slate-500">(optional)</span></label>
+                <input id="githubUrl" type="url" wire:model="githubUrl" placeholder="https://github.com/owner/repo/pull/123" @error('githubUrl') aria-describedby="github-url-error" aria-invalid="true" @enderror class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-sm outline-none focus:border-indigo-600 focus:ring-4 focus:ring-indigo-600/10 dark:border-slate-700 dark:bg-slate-950 dark:text-white">
+                @error('githubUrl') <p id="github-url-error" class="mt-1.5 text-sm text-red-600 dark:text-red-400">{{ $message }}</p> @enderror
+                <p class="mt-1.5 text-xs text-slate-500 dark:text-slate-400">Use an HTTPS link on github.com.</p>
             </div>
 
             <div>

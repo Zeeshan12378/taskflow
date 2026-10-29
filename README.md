@@ -11,6 +11,7 @@ For an AI-oriented architecture and continuation guide, read [docs/AI_HANDOFF.md
 - Teams with owners, admins, and members. Team members inherit access to team projects; projects can also grant direct access.
 - Projects with overview, board, list, calendar, reports, and settings views. Reports include task distributions, recent activity and completion trends. Projects have configurable workflow columns and a completion column.
 - Task types (`task`, `bug`, `feature`), priorities (`low`, `medium`, `high`, `urgent`), due dates, blocked reasons, assignees, reviewers, and story point estimates on the Fibonacci scale (1–21).
+- Optional HTTPS GitHub references on tasks, restricted to `github.com` URLs and recorded in task activity.
 - Board search and filters for workflow status, type, priority, due dates, date ranges, assignee, reviewer, reporter, cycle, and blocked tasks.
 - Task detail modal with inline field editing, comments, activity history, and in-app notifications for task events.
 - Team sprint planning with dates, a sprint goal, and overlap validation. Managers start and complete sprints, only one sprint can be active per team, and unfinished tasks can roll to backlog or another planned sprint. Sprint overview shows task and estimate completion. Tasks on team projects can be assigned to active or upcoming sprints.

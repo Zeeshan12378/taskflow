@@ -3,11 +3,11 @@
 namespace Tests\Feature;
 
 use App\Models\Project;
-use App\Models\ProjectStatus;
 use App\Models\Task;
+use App\Models\Team;
 use App\Models\User;
-use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Database\QueryException;
+use Illuminate\Foundation\Testing\RefreshDatabase;
 use Livewire\Livewire;
 use Tests\TestCase;
 
@@ -37,6 +37,7 @@ class TasksTest extends TestCase
             ->set('priority', 'high')
             ->set('type', 'bug')
             ->set('dueDate', today()->addDays(3)->format('Y-m-d'))
+            ->set('githubUrl', 'https://github.com/taskflow/app/pull/42')
             ->call('save')
             ->assertHasNoErrors()
             ->assertRedirect(route('projects.board', $project));
@@ -48,7 +49,27 @@ class TasksTest extends TestCase
             'title' => 'Prepare release notes',
             'priority' => 'high',
             'type' => 'bug',
+            'github_url' => 'https://github.com/taskflow/app/pull/42',
         ]);
+    }
+
+    public function test_task_github_reference_rejects_non_github_and_non_https_urls(): void
+    {
+        $user = User::factory()->create();
+        $project = $this->createProject($user);
+
+        Livewire::actingAs($user)
+            ->test('tasks.form', ['project' => $project->id])
+            ->set('title', 'Unsafe reference')
+            ->set('githubUrl', 'https://github.com.attacker.example/taskflow/app/pull/42')
+            ->call('save')
+            ->assertHasErrors(['githubUrl'])
+            ->assertSee('The GitHub reference must be an https://github.com URL.')
+            ->set('githubUrl', 'http://github.com/taskflow/app/pull/42')
+            ->call('save')
+            ->assertHasErrors(['githubUrl']);
+
+        $this->assertDatabaseMissing('tasks', ['title' => 'Unsafe reference']);
     }
 
     public function test_task_form_rejects_status_from_another_project(): void
@@ -72,7 +93,7 @@ class TasksTest extends TestCase
     {
         $owner = User::factory()->create();
         $member = User::factory()->create();
-        $team = \App\Models\Team::query()->create(['owner_id' => $owner->id, 'name' => 'Design team']);
+        $team = Team::query()->create(['owner_id' => $owner->id, 'name' => 'Design team']);
         $team->members()->attach($owner->id, ['role' => 'owner']);
         $team->members()->attach($member->id, ['role' => 'member']);
         $project = $this->createProject($owner, 'Assigned project');
@@ -232,6 +253,35 @@ class TasksTest extends TestCase
         $this->assertDatabaseHas('tasks', ['id' => $task->id, 'priority' => 'urgent']);
     }
 
+    public function test_task_github_reference_can_be_added_cleared_and_is_recorded_in_activity(): void
+    {
+        $user = User::factory()->create();
+        $project = $this->createProject($user);
+        $task = $this->createTask($user, $project, ['title' => 'Link the pull request']);
+
+        Livewire::actingAs($user)
+            ->test('tasks.form', ['project' => $project->id, 'task' => $task->id, 'modal' => true])
+            ->assertSee('GitHub reference')
+            ->call('editDetailField', 'githubUrl')
+            ->set('githubUrl', 'https://github.com/taskflow/app/pull/42')
+            ->call('saveDetailField', 'githubUrl')
+            ->assertHasNoErrors()
+            ->assertSee('https://github.com/taskflow/app/pull/42')
+            ->assertSee('set GitHub reference to https://github.com/taskflow/app/pull/42')
+            ->call('editDetailField', 'githubUrl')
+            ->set('githubUrl', '')
+            ->call('saveDetailField', 'githubUrl')
+            ->assertHasNoErrors()
+            ->assertSee('cleared GitHub reference');
+
+        $this->assertDatabaseHas('tasks', ['id' => $task->id, 'github_url' => null]);
+        $this->assertDatabaseHas('task_activities', [
+            'task_id' => $task->id,
+            'actor_id' => $user->id,
+            'action' => 'updated',
+        ]);
+    }
+
     public function test_task_story_point_estimates_validate_and_are_editable_in_the_modal(): void
     {
         $user = User::factory()->create();
@@ -339,7 +389,7 @@ class TasksTest extends TestCase
     public function test_project_board_cycle_filter_only_uses_the_current_team_cycles(): void
     {
         $owner = User::factory()->create();
-        $team = \App\Models\Team::query()->create(['owner_id' => $owner->id, 'name' => 'Board filters team']);
+        $team = Team::query()->create(['owner_id' => $owner->id, 'name' => 'Board filters team']);
         $team->members()->attach($owner->id, ['role' => 'owner']);
         $project = $this->createProject($owner);
         $project->update(['team_id' => $team->id]);

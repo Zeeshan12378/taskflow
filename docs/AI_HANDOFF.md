@@ -6,7 +6,7 @@ This document gives a coding assistant enough context to continue TaskFlow witho
 
 TaskFlow is an internal project and task-management application for software teams. It supports task planning and delivery across projects, teams, review, QA, and team sprints. The product is being built incrementally. Make one small, reviewable change at a time.
 
-The core application is implemented: authentication, projects, teams and sharing, configurable project workflows, task management, project views, task collaboration, in-app notifications, and a team sprint lifecycle. The UI has a project sidebar and project-level Overview, Board, List, Calendar, Reports, and Settings views. Reports use task activity for recent completion and update metrics, and current project task data for distributions, trends, and cycle/lead times. Board tasks open in a detail modal; task fields are shown as previews and edited one field at a time. Task creation can happen in a modal from the board.
+The core application is implemented: authentication, projects, teams and sharing, configurable project workflows, task management, project views, task collaboration, in-app notifications, and a team sprint lifecycle. Tasks can store one optional HTTPS GitHub reference, restricted to `github.com`, and changes appear in the task activity timeline. The UI has a project sidebar and project-level Overview, Board, List, Calendar, Reports, and Settings views. Reports use task activity for recent completion and update metrics, and current project task data for distributions, trends, and cycle/lead times. Board tasks open in a detail modal; task fields are shown as previews and edited one field at a time. Task creation can happen in a modal from the board.
 
 The current editor is a dependency-free, contenteditable Blade component with formatting, paragraph/heading styles, lists, text colors, tables, code blocks, emoji, links, undo/redo, slash-command insertion, and image URLs. It is used for task/project/team descriptions, blocked reasons, and comments. Rich text is sanitized on the server. Images and attachments are URL references; there is no upload/storage flow.
 
@@ -126,9 +126,8 @@ The current app has sprint planning/lifecycle and aggregate progress, project re
 
 Potential next increments, after checking the live code and tests:
 
-1. GitHub references/links on tasks (start with safe URL references; defer webhook automation and OAuth unless needed).
-2. Historical sprint reports (burndown, scope changes, velocity) after defining and storing immutable snapshots or sufficient task history.
-3. Reusable project/task templates and recurring task creation if the team confirms a real workflow need.
-4. Optional time tracking and more advanced automations only after defining the smallest useful workflow and permission model.
+1. Historical sprint reports (burndown, scope changes, velocity) after defining and storing immutable snapshots or sufficient task history.
+2. Reusable project/task templates and recurring task creation if the team confirms a real workflow need.
+3. Optional GitHub pull request status sync, time tracking, and more advanced automations only after defining the smallest useful workflow and permission model.
 
 Do not implement a whole roadmap in one change. First inspect the relevant current implementation, then choose one bounded feature and define its acceptance criteria and tests.

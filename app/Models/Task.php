@@ -2,12 +2,12 @@
 
 namespace App\Models;
 
+use App\Notifications\TaskNotification;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Facades\Auth;
-use App\Notifications\TaskNotification;
 
 class Task extends Model
 {
@@ -30,7 +30,7 @@ class Task extends Model
         static::updated(function (Task $task): void {
             $previous = $task->getPrevious();
             $changes = $task->getChanges();
-            $tracked = ['title', 'description', 'project_status_id', 'priority', 'type', 'due_date', 'assignee_id', 'reviewer_id', 'cycle_id', 'story_points', 'blocked_reason'];
+            $tracked = ['title', 'description', 'project_status_id', 'priority', 'type', 'due_date', 'assignee_id', 'reviewer_id', 'cycle_id', 'story_points', 'blocked_reason', 'github_url'];
             $details = [];
 
             foreach ($tracked as $field) {
@@ -80,6 +80,7 @@ class Task extends Model
         'description',
         'priority',
         'due_date',
+        'github_url',
     ];
 
     protected function casts(): array
