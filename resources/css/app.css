@@ -1,0 +1,132 @@
+@import 'tailwindcss';
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@source '../views/**/*.blade.php';
+@source '../js/**/*.js';
+@source '../../vendor/laravel/framework/src/Illuminate/Pagination/resources/views/*.blade.php';
+@source '../../storage/framework/views/*.php';
+
+@theme {
+    --font-sans: 'Instrument Sans', ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji',
+        'Segoe UI Symbol', 'Noto Color Emoji';
+}
+
+@layer base {
+    html {
+        color-scheme: light;
+    }
+
+    html.dark {
+        color-scheme: dark;
+    }
+
+    [x-cloak] {
+        display: none !important;
+    }
+}
+
+.rich-text-content:empty::before {
+    color: #94a3b8;
+    content: attr(data-placeholder);
+    pointer-events: none;
+}
+
+.dark .rich-text-content:empty::before {
+    color: #64748b;
+}
+
+.rich-text-content p,
+.rich-text-content div,
+.rich-text-output p,
+.rich-text-output div {
+    margin-block: 0.35rem;
+}
+
+.rich-text-content ul,
+.rich-text-output ul {
+    list-style: disc;
+    margin-block: 0.5rem;
+    padding-left: 1.5rem;
+}
+
+.rich-text-content ol,
+.rich-text-output ol {
+    list-style: decimal;
+    margin-block: 0.5rem;
+    padding-left: 1.5rem;
+}
+
+.rich-text-content blockquote,
+.rich-text-output blockquote {
+    border-left: 3px solid #cbd5e1;
+    margin-block: 0.5rem;
+    padding-left: 0.75rem;
+}
+
+.rich-text-content a,
+.rich-text-output a {
+    color: #4f46e5;
+    text-decoration: underline;
+}
+
+.rich-text-content [data-text-color="#dc2626"], .rich-text-output [data-text-color="#dc2626"] { color: #dc2626; }
+.rich-text-content [data-text-color="#2563eb"], .rich-text-output [data-text-color="#2563eb"] { color: #2563eb; }
+.rich-text-content [data-text-color="#16a34a"], .rich-text-output [data-text-color="#16a34a"] { color: #16a34a; }
+.rich-text-content [data-text-color="#9333ea"], .rich-text-output [data-text-color="#9333ea"] { color: #9333ea; }
+
+.rich-text-content table,
+.rich-text-output table {
+    border-collapse: collapse;
+    margin-block: 0.75rem;
+    table-layout: fixed;
+    width: 100%;
+}
+
+.rich-text-content th,
+.rich-text-content td,
+.rich-text-output th,
+.rich-text-output td {
+    border: 1px solid #cbd5e1;
+    min-width: 4rem;
+    padding: 0.4rem 0.55rem;
+    text-align: left;
+}
+
+.rich-text-content th,
+.rich-text-output th {
+    background: #f1f5f9;
+    font-weight: 600;
+}
+
+.rich-text-content img,
+.rich-text-output img {
+    height: auto;
+    max-width: 100%;
+}
+
+.rich-text-content pre,
+.rich-text-output pre {
+    overflow-x: auto;
+    border-radius: 0.5rem;
+    background: #f1f5f9;
+    padding: 0.75rem;
+    white-space: pre-wrap;
+}
+
+.rich-text-content code,
+.rich-text-output code {
+    border-radius: 0.25rem;
+    background: #f1f5f9;
+    font-family: ui-monospace, monospace;
+    padding: 0.1rem 0.25rem;
+}
+
+.dark .rich-text-content th,
+.dark .rich-text-output th,
+.dark .rich-text-content pre,
+.dark .rich-text-output pre,
+.dark .rich-text-content code,
+.dark .rich-text-output code {
+    background: #1e293b;
+}
