@@ -15,6 +15,22 @@ class Task extends Model
 
     protected static function booted(): void
     {
+        static::creating(function (Task $task): void {
+            if (! $task->isDirty('board_position')) {
+                $task->board_position = (static::query()
+                    ->where('project_status_id', $task->project_status_id)
+                    ->max('board_position') ?? -1) + 1;
+            }
+        });
+
+        static::updating(function (Task $task): void {
+            if ($task->isDirty('project_status_id') && ! $task->isDirty('board_position')) {
+                $task->board_position = (static::query()
+                    ->where('project_status_id', $task->project_status_id)
+                    ->max('board_position') ?? -1) + 1;
+            }
+        });
+
         static::created(function (Task $task): void {
             $task->recordActivity('created', ['title' => ['to' => $task->title]]);
 
@@ -96,6 +112,7 @@ class Task extends Model
         return [
             'due_date' => 'date',
             'story_points' => 'integer',
+            'board_position' => 'integer',
             'checklist' => 'array',
         ];
     }

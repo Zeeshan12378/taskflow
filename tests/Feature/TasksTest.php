@@ -768,6 +768,142 @@ class TasksTest extends TestCase
         $this->assertDatabaseHas('tasks', ['id' => $task->id, 'project_status_id' => $targetStatus->id]);
     }
 
+    public function test_board_tasks_can_be_reordered_vertically_and_order_is_persisted(): void
+    {
+        $user = User::factory()->create();
+        $project = $this->createProject($user);
+        $status = $project->statuses()->where('name', 'To Do')->firstOrFail();
+        $firstTask = $this->createTask($user, $project, ['title' => 'First card']);
+        $secondTask = $this->createTask($user, $project, ['title' => 'Second card']);
+        $thirdTask = $this->createTask($user, $project, ['title' => 'Third card']);
+
+        Livewire::actingAs($user)
+            ->test('projects.board', ['project' => $project->id])
+            ->call('sortTask', $thirdTask->id, 0, $status->id)
+            ->assertSee('Task order updated.');
+
+        $this->assertSame(
+            [$thirdTask->id, $firstTask->id, $secondTask->id],
+            $project->tasks()->where('project_status_id', $status->id)->orderBy('board_position')->pluck('id')->all(),
+        );
+    }
+
+    public function test_board_dragging_a_task_to_another_column_saves_its_position(): void
+    {
+        $user = User::factory()->create();
+        $project = $this->createProject($user);
+        $sourceStatus = $project->statuses()->where('name', 'To Do')->firstOrFail();
+        $targetStatus = $project->statuses()->where('name', 'In Progress')->firstOrFail();
+        $movedTask = $this->createTask($user, $project, ['title' => 'Move this card']);
+        $existingTargetTask = $this->createTask($user, $project, [
+            'title' => 'Keep this card first',
+            'project_status_id' => $targetStatus->id,
+        ]);
+
+        Livewire::actingAs($user)
+            ->test('projects.board', ['project' => $project->id])
+            ->call('sortTask', $movedTask->id, 1, $targetStatus->id)
+            ->assertSee('Task moved to In Progress.');
+
+        $this->assertSame(
+            [$existingTargetTask->id, $movedTask->id],
+            $project->tasks()->where('project_status_id', $targetStatus->id)->orderBy('board_position')->pluck('id')->all(),
+        );
+        $this->assertDatabaseHas('task_activities', [
+            'task_id' => $movedTask->id,
+            'actor_id' => $user->id,
+            'action' => 'updated',
+        ]);
+        $this->assertDatabaseHas('tasks', [
+            'id' => $movedTask->id,
+            'project_status_id' => $targetStatus->id,
+            'board_position' => 1,
+        ]);
+    }
+
+    public function test_board_dragging_into_review_without_a_reviewer_keeps_task_in_its_column(): void
+    {
+        $user = User::factory()->create();
+        $project = $this->createProject($user);
+        $task = $this->createTask($user, $project, ['title' => 'Needs review']);
+        $sourceStatusId = $task->project_status_id;
+        $reviewStatus = $project->statuses()->where('name', 'Verify')->firstOrFail();
+
+        Livewire::actingAs($user)
+            ->test('projects.board', ['project' => $project->id])
+            ->call('sortTask', $task->id, 0, $reviewStatus->id)
+            ->assertSee('Assign a reviewer in task details before moving this task into review.');
+
+        $this->assertDatabaseHas('tasks', [
+            'id' => $task->id,
+            'project_status_id' => $sourceStatusId,
+            'board_position' => 0,
+        ]);
+        $this->assertDatabaseMissing('task_activities', [
+            'task_id' => $task->id,
+            'action' => 'updated',
+        ]);
+    }
+
+    public function test_board_dragging_into_blocked_without_a_reason_keeps_task_in_its_column(): void
+    {
+        $user = User::factory()->create();
+        $project = $this->createProject($user);
+        $task = $this->createTask($user, $project, ['title' => 'Needs investigation']);
+        $sourceStatusId = $task->project_status_id;
+        $blockedStatus = $project->statuses()->whereRaw('lower(name) = ?', ['blocked'])->firstOrFail();
+
+        Livewire::actingAs($user)
+            ->test('projects.board', ['project' => $project->id])
+            ->call('sortTask', $task->id, 0, $blockedStatus->id)
+            ->assertSee('Add a blocked reason in task details before moving this task to Blocked.');
+
+        $this->assertDatabaseHas('tasks', [
+            'id' => $task->id,
+            'project_status_id' => $sourceStatusId,
+            'blocked_reason' => null,
+        ]);
+    }
+
+    public function test_board_sort_rejects_a_status_from_another_project(): void
+    {
+        $user = User::factory()->create();
+        $project = $this->createProject($user);
+        $otherProject = $this->createProject($user, 'Other project');
+        $task = $this->createTask($user, $project);
+        $foreignStatus = $otherProject->statuses()->where('name', 'In Progress')->firstOrFail();
+
+        Livewire::actingAs($user)
+            ->test('projects.board', ['project' => $project->id])
+            ->call('sortTask', $task->id, 0, $foreignStatus->id)
+            ->assertNotFound();
+
+        $this->assertDatabaseHas('tasks', [
+            'id' => $task->id,
+            'project_status_id' => $task->project_status_id,
+        ]);
+    }
+
+    public function test_board_reordering_is_rejected_while_filters_are_active(): void
+    {
+        $user = User::factory()->create();
+        $project = $this->createProject($user);
+        $status = $project->statuses()->where('name', 'To Do')->firstOrFail();
+        $task = $this->createTask($user, $project);
+
+        Livewire::actingAs($user)
+            ->test('projects.board', ['project' => $project->id])
+            ->set('search', 'Test')
+            ->call('sortTask', $task->id, 0, $status->id)
+            ->assertSee('Clear board filters before reordering tasks.');
+
+        $this->assertDatabaseHas('tasks', [
+            'id' => $task->id,
+            'project_status_id' => $status->id,
+            'board_position' => 0,
+        ]);
+    }
+
     public function test_board_quick_add_creates_task_in_selected_column_and_records_activity(): void
     {
         $user = User::factory()->create();

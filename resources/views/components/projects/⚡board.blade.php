@@ -161,7 +161,19 @@ new #[Layout('layouts.app')] #[Title('Project board · TaskFlow')] class extends
             $query->whereHas('status', fn (Builder $query) => $query->whereRaw('lower(name) = ?', ['blocked']));
         }
 
-        return $query->orderByRaw('due_date is null')->orderBy('due_date')->latest('updated_at')->get()->groupBy('project_status_id');
+        return $query->orderBy('board_position')
+            ->orderByRaw('due_date is null')
+            ->orderBy('due_date')
+            ->latest('updated_at')
+            ->orderByDesc('id')
+            ->get()
+            ->groupBy('project_status_id');
+    }
+
+    #[Computed]
+    public function canReorderTasks(): bool
+    {
+        return trim($this->search) === '' && $this->activeFilterCount === 0;
     }
 
     #[Computed]
@@ -263,6 +275,82 @@ new #[Layout('layouts.app')] #[Title('Project board · TaskFlow')] class extends
             $this->feedback('Task moved to '.$status->name.'.');
             unset($this->tasksByStatus);
         }
+    }
+
+    public function sortTask(int $taskId, int $position, int $statusId): void
+    {
+        if (! $this->canReorderTasks) {
+            $this->feedback('Clear board filters before reordering tasks.', 'error');
+
+            return;
+        }
+
+        if ($position < 0) {
+            $this->feedback('Choose a valid task position.', 'error');
+
+            return;
+        }
+
+        $project = $this->ownedProject();
+        $this->authorize('view', $project);
+        $status = $project->statuses()->findOrFail($statusId);
+
+        $wasMoved = DB::transaction(function () use ($project, $status, $taskId, $position): ?bool {
+            $task = $project->tasks()->lockForUpdate()->findOrFail($taskId);
+            $this->authorize('update', $task);
+            $sourceStatusId = $task->project_status_id;
+
+            if ($sourceStatusId !== $status->id) {
+                if ($status->requiresReviewer() && $task->reviewer_id === null) {
+                    $this->feedback('Assign a reviewer in task details before moving this task into review.', 'error');
+
+                    return null;
+                }
+
+                if (strtolower(trim($status->name)) === 'blocked' && blank($task->blocked_reason)) {
+                    $this->feedback('Add a blocked reason in task details before moving this task to Blocked.', 'error');
+
+                    return null;
+                }
+            }
+
+            $sourceTaskIds = $this->orderedTaskIds($project, $sourceStatusId);
+
+            if ($sourceStatusId === $status->id) {
+                $sourceTaskIds = array_values(array_filter(
+                    $sourceTaskIds,
+                    fn (int $id): bool => $id !== $task->id,
+                ));
+                array_splice($sourceTaskIds, min($position, count($sourceTaskIds)), 0, [$task->id]);
+                $this->persistTaskOrder($project, $sourceTaskIds);
+
+                return false;
+            }
+
+            $targetTaskIds = $this->orderedTaskIds($project, $status->id);
+            $sourceTaskIds = array_values(array_filter(
+                $sourceTaskIds,
+                fn (int $id): bool => $id !== $task->id,
+            ));
+            array_splice($targetTaskIds, min($position, count($targetTaskIds)), 0, [$task->id]);
+
+            $task->project_status_id = $status->id;
+            $task->board_position = $position;
+            $task->blocked_reason = strtolower(trim($status->name)) === 'blocked' ? $task->blocked_reason : null;
+            $task->save();
+
+            $this->persistTaskOrder($project, $sourceTaskIds);
+            $this->persistTaskOrder($project, $targetTaskIds);
+
+            return true;
+        });
+
+        if ($wasMoved === null) {
+            return;
+        }
+
+        $this->feedback($wasMoved ? 'Task moved to '.$status->name.'.' : 'Task order updated.');
+        unset($this->tasksByStatus);
     }
 
     public function startQuickAddTask(int $statusId): void
@@ -379,6 +467,37 @@ new #[Layout('layouts.app')] #[Title('Project board · TaskFlow')] class extends
         return Project::query()->accessibleTo(auth()->user())->findOrFail($this->projectId);
     }
 
+    /**
+     * @return array<int, int>
+     */
+    private function orderedTaskIds(Project $project, int $statusId): array
+    {
+        return $project->tasks()
+            ->where('project_status_id', $statusId)
+            ->orderBy('board_position')
+            ->orderByRaw('due_date is null')
+            ->orderBy('due_date')
+            ->latest('updated_at')
+            ->orderByDesc('id')
+            ->lockForUpdate()
+            ->pluck('id')
+            ->map(fn (int $id): int => $id)
+            ->all();
+    }
+
+    /**
+     * @param  array<int, int>  $taskIds
+     */
+    private function persistTaskOrder(Project $project, array $taskIds): void
+    {
+        foreach ($taskIds as $position => $taskId) {
+            DB::table('tasks')
+                ->where('project_id', $project->id)
+                ->where('id', $taskId)
+                ->update(['board_position' => $position]);
+        }
+    }
+
     private function feedback(string $message, string $type = 'success'): void
     {
         $this->statusMessage = $message;
@@ -452,8 +571,10 @@ new #[Layout('layouts.app')] #[Title('Project board · TaskFlow')] class extends
             @php($columnTasks = $this->tasksByStatus->get($status->id, collect()))
             <section
                 wire:key="board-column-{{ $status->id }}"
-                x-on:dragover.prevent="$event.dataTransfer.dropEffect = 'move'"
-                x-on:drop.prevent="const taskId = Number($event.dataTransfer.getData('text/plain')); if (taskId) $wire.moveTask(taskId, {{ $status->id }})"
+                @if (! $this->canReorderTasks)
+                    x-on:dragover.prevent="$event.dataTransfer.dropEffect = 'move'"
+                    x-on:drop.prevent="const taskId = Number($event.dataTransfer.getData('text/plain')); if (taskId) $wire.moveTask(taskId, {{ $status->id }})"
+                @endif
                 class="flex h-[calc(100dvh-21rem)] min-h-72 w-[min(86vw,21rem)] shrink-0 snap-start flex-col rounded-xl border border-slate-200 bg-slate-100/70 p-3 dark:border-slate-800 dark:bg-slate-900/60 sm:w-80"
             >
                 <header style="border-top-color: {{ $status->accentHex() }}" class="flex items-start justify-between gap-2 rounded-lg border-t-4 bg-white px-3 py-3 dark:bg-slate-950">
@@ -466,15 +587,31 @@ new #[Layout('layouts.app')] #[Title('Project board · TaskFlow')] class extends
                     @endif
                 </header>
 
-                <div class="mt-3 min-h-24 flex-1 space-y-3 overflow-y-auto overscroll-y-contain pr-1 [scrollbar-gutter:stable]">
+                <div
+                    @if ($this->canReorderTasks)
+                        wire:sort="sortTask"
+                        wire:sort:group="board-{{ $this->projectId }}"
+                        wire:sort:group-id="{{ $status->id }}"
+                    @endif
+                    class="mt-3 min-h-24 flex-1 space-y-3 overflow-y-auto overscroll-y-contain pr-1 [scrollbar-gutter:stable]"
+                >
                     @forelse ($columnTasks as $task)
                         <article
                             wire:key="board-task-{{ $task->id }}"
-                            draggable="true"
-                            x-on:dragstart="$event.dataTransfer.effectAllowed = 'move'; $event.dataTransfer.setData('text/plain', '{{ $task->id }}')"
-                            class="cursor-grab rounded-lg border border-slate-200 bg-white p-4 shadow-sm transition hover:border-indigo-300 hover:shadow-md active:cursor-grabbing dark:border-slate-800 dark:bg-slate-950 dark:hover:border-indigo-800"
+                            @if ($this->canReorderTasks)
+                                wire:sort:item="{{ $task->id }}"
+                            @else
+                                draggable="true"
+                                x-on:dragstart="$event.dataTransfer.effectAllowed = 'move'; $event.dataTransfer.setData('text/plain', '{{ $task->id }}')"
+                            @endif
+                            class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm transition hover:border-indigo-300 hover:shadow-md dark:border-slate-800 dark:bg-slate-950 dark:hover:border-indigo-800"
                         >
                             <div class="flex items-start justify-between gap-2">
+                                @if ($this->canReorderTasks)
+                                    <span wire:sort:handle title="Drag to reorder" aria-label="Drag to reorder {{ $task->title }}" class="mt-0.5 shrink-0 cursor-grab text-slate-400 active:cursor-grabbing dark:text-slate-500">
+                                        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="M7 4a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Zm0 6a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Zm0 6a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Zm9-12a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Zm0 6a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Zm0 6a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Z" /></svg>
+                                    </span>
+                                @endif
                                 <button type="button" wire:click="openTask({{ $task->id }})" class="min-w-0 text-left text-sm font-semibold leading-5 text-slate-900 hover:text-indigo-700 focus:outline-none focus-visible:underline dark:text-white dark:hover:text-indigo-300">{{ $task->title }}</button>
                                 <span @class([
                                     'shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide',
@@ -522,7 +659,7 @@ new #[Layout('layouts.app')] #[Title('Project board · TaskFlow')] class extends
                             </div>
                         </article>
                     @empty
-                        <div class="rounded-lg border border-dashed border-slate-300 bg-white/70 px-4 py-7 text-center dark:border-slate-700 dark:bg-slate-950/40">
+                        <div @if ($this->canReorderTasks) wire:sort:ignore @endif class="rounded-lg border border-dashed border-slate-300 bg-white/70 px-4 py-7 text-center dark:border-slate-700 dark:bg-slate-950/40">
                             <p class="text-xs font-medium text-slate-500 dark:text-slate-400">No tasks in this column</p>
                             <button type="button" wire:click="openCreateTask" class="mt-2 inline-block text-xs font-semibold text-indigo-600 hover:underline dark:text-indigo-400">Add a task</button>
                         </div>
