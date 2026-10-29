@@ -3,6 +3,7 @@
 use App\Models\Project;
 use App\Models\Cycle;
 use App\Models\Task;
+use App\Models\TaskTemplate;
 use App\Support\RichText;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
@@ -43,6 +44,12 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
     public string $cycleId = '';
 
     public string $storyPoints = '';
+
+    public string $selectedTaskTemplate = '';
+
+    public string $templateName = '';
+
+    public string $templateMessage = '';
 
     public string $commentBody = '';
 
@@ -131,6 +138,12 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
     public function comments()
     {
         return $this->task?->comments()->with('user')->latest()->limit(50)->get()->reverse()->values() ?? collect();
+    }
+
+    #[Computed]
+    public function taskTemplates()
+    {
+        return $this->project->taskTemplates()->get();
     }
 
     #[Computed]
@@ -259,6 +272,84 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
         $this->editingDescription = false;
         unset($this->task, $this->activities);
         $this->dispatch('task-modal-refresh');
+    }
+
+    public function applyTaskTemplate(): void
+    {
+        abort_if($this->taskId !== null, 404);
+
+        $project = $this->project;
+        $this->authorize('create', [Task::class, $project]);
+        $validated = $this->validate([
+            'selectedTaskTemplate' => [
+                'required',
+                'integer',
+                Rule::exists('task_templates', 'id')->where('project_id', $project->id),
+            ],
+        ]);
+        $template = $project->taskTemplates()->findOrFail($validated['selectedTaskTemplate']);
+
+        $this->title = $template->title;
+        $this->description = $template->description ?? '';
+        $this->type = $template->type;
+        $this->priority = $template->priority;
+        $this->storyPoints = (string) ($template->story_points ?? '');
+        $this->templateMessage = 'Template applied. Add task-specific details before saving.';
+        $this->resetValidation(['title', 'description', 'type', 'priority', 'storyPoints', 'selectedTaskTemplate']);
+    }
+
+    public function saveTaskTemplate(): void
+    {
+        $project = $this->project;
+        $this->authorize('update', $project);
+
+        $this->templateName = trim($this->templateName);
+        $this->title = trim($this->title);
+        $this->description = RichText::sanitize($this->description);
+
+        $validated = $this->validate([
+            'templateName' => [
+                'required',
+                'string',
+                'max:100',
+                Rule::unique('task_templates', 'name')->where('project_id', $project->id),
+            ],
+            'title' => ['required', 'string', 'max:180'],
+            'description' => ['nullable', 'string', 'max:20000'],
+            'type' => ['required', Rule::in(Task::TYPES)],
+            'priority' => ['required', Rule::in(Task::PRIORITIES)],
+            'storyPoints' => ['nullable', 'integer', Rule::in([1, 2, 3, 5, 8, 13, 21])],
+        ]);
+
+        if (mb_strlen(RichText::plainText($validated['description'] ?? '')) > 5000) {
+            $this->addError('description', 'The description may not be greater than 5000 characters.');
+
+            return;
+        }
+
+        $project->taskTemplates()->create([
+            'created_by' => auth()->id(),
+            'name' => $validated['templateName'],
+            'title' => $validated['title'],
+            'description' => $validated['description'] ?: null,
+            'type' => $validated['type'],
+            'priority' => $validated['priority'],
+            'story_points' => blank($validated['storyPoints'] ?? null) ? null : $validated['storyPoints'],
+        ]);
+
+        $this->templateName = '';
+        $this->templateMessage = 'Task template saved.';
+        $this->resetValidation('templateName');
+        unset($this->taskTemplates);
+    }
+
+    public function deleteTaskTemplate(int $templateId): void
+    {
+        $project = $this->project;
+        $this->authorize('update', $project);
+        $project->taskTemplates()->findOrFail($templateId)->delete();
+        $this->templateMessage = 'Task template deleted.';
+        unset($this->taskTemplates);
     }
 
     public function editDetailField(string $field): void
@@ -573,6 +664,51 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
         </section>
     @else
     <form wire:submit="save" class="{{ $modal && $taskId ? 'space-y-5' : 'mt-7 space-y-6' }} rounded-xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8 dark:border-slate-800 dark:bg-slate-900">
+        @if (! $taskId)
+            <section class="space-y-3 rounded-lg border border-slate-200 p-4 dark:border-slate-700" aria-label="Task templates">
+                <div>
+                    <label for="selectedTaskTemplate" class="block text-sm font-medium text-slate-900 dark:text-slate-200">Start from a project template</label>
+                    <div class="mt-1.5 flex flex-col gap-2 sm:flex-row">
+                        <select id="selectedTaskTemplate" wire:model="selectedTaskTemplate" @error('selectedTaskTemplate') aria-describedby="task-template-error" aria-invalid="true" @enderror class="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-sm outline-none focus:border-indigo-600 focus:ring-4 focus:ring-indigo-600/10 dark:border-slate-700 dark:bg-slate-950 dark:text-white">
+                            <option value="">Choose a template</option>
+                            @foreach ($this->taskTemplates as $template)
+                                <option value="{{ $template->id }}">{{ $template->name }}</option>
+                            @endforeach
+                        </select>
+                        <button type="button" wire:click="applyTaskTemplate" class="inline-flex min-h-11 items-center justify-center rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800">Apply template</button>
+                    </div>
+                    @error('selectedTaskTemplate') <p id="task-template-error" class="text-sm text-red-600 dark:text-red-400">{{ $message }}</p> @enderror
+                </div>
+            </section>
+        @endif
+
+        @can('update', $this->project)
+            <section class="space-y-3 rounded-lg border border-slate-200 p-4 dark:border-slate-700" aria-label="Manage project task templates">
+                <div>
+                    <label for="templateName" class="block text-sm font-medium text-slate-900 dark:text-slate-200">Save current task details as a template</label>
+                    <div class="mt-1.5 flex flex-col gap-2 sm:flex-row">
+                        <input id="templateName" type="text" wire:model="templateName" maxlength="100" placeholder="Template name" @error('templateName') aria-describedby="template-name-error" aria-invalid="true" @enderror class="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-sm outline-none focus:border-indigo-600 focus:ring-4 focus:ring-indigo-600/10 dark:border-slate-700 dark:bg-slate-950 dark:text-white">
+                        <button type="button" wire:click="saveTaskTemplate" class="inline-flex min-h-11 items-center justify-center rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-indigo-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 focus-visible:ring-offset-2">Save template</button>
+                    </div>
+                    @error('templateName') <p id="template-name-error" class="text-sm text-red-600 dark:text-red-400">{{ $message }}</p> @enderror
+                </div>
+                @if ($this->taskTemplates->isNotEmpty())
+                    <ul class="flex flex-wrap gap-2" aria-label="Saved project task templates">
+                        @foreach ($this->taskTemplates as $template)
+                            <li wire:key="task-template-{{ $template->id }}" class="inline-flex items-center gap-2 rounded-full bg-slate-100 py-1 pl-3 pr-1 text-sm text-slate-700 dark:bg-slate-800 dark:text-slate-200">
+                                <span>{{ $template->name }}</span>
+                                <button type="button" wire:click="deleteTaskTemplate({{ $template->id }})" wire:confirm="Delete the {{ $template->name }} template?" aria-label="Delete {{ $template->name }} template" class="inline-flex h-7 w-7 items-center justify-center rounded-full text-slate-500 hover:bg-white hover:text-red-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600 dark:hover:bg-slate-700">×</button>
+                            </li>
+                        @endforeach
+                    </ul>
+                @endif
+            </section>
+        @endcan
+
+        @if ($templateMessage !== '')
+            <p role="status" class="text-sm font-medium text-emerald-700 dark:text-emerald-400">{{ $templateMessage }}</p>
+        @endif
+
         @if (! $modal || ! $taskId)
         <div>
             <label for="title" class="block text-sm font-medium text-slate-900 dark:text-slate-200">Task title</label>

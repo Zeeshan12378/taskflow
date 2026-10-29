@@ -53,6 +53,169 @@ class TasksTest extends TestCase
         ]);
     }
 
+    public function test_project_owner_can_save_and_apply_a_task_template_without_overwriting_task_specific_fields(): void
+    {
+        $user = User::factory()->create();
+        $project = $this->createProject($user);
+        $status = $project->statuses()->where('name', 'To Do')->firstOrFail();
+
+        Livewire::actingAs($user)
+            ->test('tasks.form', ['project' => $project->id])
+            ->set('templateName', 'Regression test')
+            ->set('title', 'Run regression tests')
+            ->set('description', '<p>Cover the release-critical behavior.</p>')
+            ->set('type', 'bug')
+            ->set('priority', 'high')
+            ->set('storyPoints', '8')
+            ->call('saveTaskTemplate')
+            ->assertHasNoErrors()
+            ->assertSee('Task template saved.');
+
+        $template = $project->taskTemplates()->firstOrFail();
+        $this->assertDatabaseHas('task_templates', [
+            'id' => $template->id,
+            'created_by' => $user->id,
+            'name' => 'Regression test',
+            'title' => 'Run regression tests',
+            'type' => 'bug',
+            'priority' => 'high',
+            'story_points' => 8,
+        ]);
+
+        Livewire::actingAs($user)
+            ->test('tasks.form', ['project' => $project->id])
+            ->set('selectedTaskTemplate', (string) $template->id)
+            ->set('statusId', (string) $status->id)
+            ->set('dueDate', today()->addDays(3)->format('Y-m-d'))
+            ->call('applyTaskTemplate')
+            ->assertHasNoErrors()
+            ->assertSet('title', 'Run regression tests')
+            ->assertSet('description', '<p>Cover the release-critical behavior.</p>')
+            ->assertSet('type', 'bug')
+            ->assertSet('priority', 'high')
+            ->assertSet('storyPoints', '8')
+            ->assertSet('statusId', (string) $status->id)
+            ->assertSet('dueDate', today()->addDays(3)->format('Y-m-d'))
+            ->call('save')
+            ->assertHasNoErrors();
+
+        $this->assertDatabaseHas('tasks', [
+            'project_id' => $project->id,
+            'user_id' => $user->id,
+            'project_status_id' => $status->id,
+            'title' => 'Run regression tests',
+            'priority' => 'high',
+            'type' => 'bug',
+            'story_points' => 8,
+            'due_date' => today()->addDays(3)->startOfDay()->toDateTimeString(),
+        ]);
+    }
+
+    public function test_project_member_can_apply_but_cannot_manage_project_task_templates(): void
+    {
+        $owner = User::factory()->create();
+        $member = User::factory()->create();
+        $project = $this->createProject($owner);
+        $project->members()->attach($member->id, ['role' => 'member']);
+        $template = $project->taskTemplates()->create([
+            'created_by' => $owner->id,
+            'name' => 'Bug report',
+            'title' => 'Investigate reported bug',
+            'description' => 'Reproduce the issue.',
+            'type' => 'bug',
+            'priority' => 'high',
+            'story_points' => null,
+        ]);
+
+        Livewire::actingAs($member)
+            ->test('tasks.form', ['project' => $project->id])
+            ->set('selectedTaskTemplate', (string) $template->id)
+            ->call('applyTaskTemplate')
+            ->assertHasNoErrors()
+            ->assertSet('title', 'Investigate reported bug')
+            ->call('saveTaskTemplate')
+            ->assertForbidden();
+
+        Livewire::actingAs($member)
+            ->test('tasks.form', ['project' => $project->id])
+            ->call('deleteTaskTemplate', $template->id)
+            ->assertForbidden();
+
+        $this->assertDatabaseHas('task_templates', ['id' => $template->id, 'name' => 'Bug report']);
+    }
+
+    public function test_project_task_template_names_must_be_unique_within_the_project(): void
+    {
+        $user = User::factory()->create();
+        $project = $this->createProject($user);
+        $project->taskTemplates()->create([
+            'created_by' => $user->id,
+            'name' => 'Bug report',
+            'title' => 'Investigate reported bug',
+            'description' => null,
+            'type' => 'bug',
+            'priority' => 'high',
+            'story_points' => null,
+        ]);
+
+        Livewire::actingAs($user)
+            ->test('tasks.form', ['project' => $project->id])
+            ->set('templateName', 'Bug report')
+            ->set('title', 'Another bug report')
+            ->call('saveTaskTemplate')
+            ->assertHasErrors(['templateName'])
+            ->assertSee('The template name has already been taken.');
+
+        $this->assertSame(1, $project->taskTemplates()->count());
+    }
+
+    public function test_project_manager_can_delete_a_project_task_template(): void
+    {
+        $user = User::factory()->create();
+        $project = $this->createProject($user);
+        $template = $project->taskTemplates()->create([
+            'created_by' => $user->id,
+            'name' => 'Bug report',
+            'title' => 'Investigate reported bug',
+            'description' => null,
+            'type' => 'bug',
+            'priority' => 'high',
+            'story_points' => null,
+        ]);
+
+        Livewire::actingAs($user)
+            ->test('tasks.form', ['project' => $project->id])
+            ->call('deleteTaskTemplate', $template->id)
+            ->assertHasNoErrors()
+            ->assertSee('Task template deleted.');
+
+        $this->assertDatabaseMissing('task_templates', ['id' => $template->id]);
+    }
+
+    public function test_project_task_template_cannot_be_applied_to_another_project(): void
+    {
+        $user = User::factory()->create();
+        $project = $this->createProject($user);
+        $otherProject = $this->createProject($user, 'Other project');
+        $template = $otherProject->taskTemplates()->create([
+            'created_by' => $user->id,
+            'name' => 'Private template',
+            'title' => 'Other project task',
+            'description' => null,
+            'type' => 'task',
+            'priority' => 'medium',
+            'story_points' => null,
+        ]);
+
+        Livewire::actingAs($user)
+            ->test('tasks.form', ['project' => $project->id])
+            ->set('selectedTaskTemplate', (string) $template->id)
+            ->call('applyTaskTemplate')
+            ->assertHasErrors(['selectedTaskTemplate']);
+
+        $this->assertDatabaseMissing('tasks', ['title' => 'Other project task']);
+    }
+
     public function test_task_github_reference_rejects_non_github_and_non_https_urls(): void
     {
         $user = User::factory()->create();
