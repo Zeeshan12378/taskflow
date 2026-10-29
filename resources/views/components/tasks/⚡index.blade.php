@@ -120,12 +120,18 @@ new #[Layout('layouts.app')] #[Title('Tasks · TaskFlow')] class extends Compone
         }
 
         $teamIds = auth()->user()->teams()->select('teams.id');
+        $accessibleProjectIds = Project::query()->accessibleTo(auth()->user())->select('projects.id');
 
         return Cycle::query()
-            ->whereIn('team_id', $teamIds)
-            ->whereHas('team.projects', fn (Builder $query) => $query->accessibleTo(auth()->user()))
+            ->where(function (Builder $query) use ($teamIds, $accessibleProjectIds): void {
+                $query->whereIn('project_id', $accessibleProjectIds)
+                    ->orWhere(function (Builder $query) use ($teamIds): void {
+                        $query->whereIn('team_id', $teamIds)
+                            ->whereHas('team.projects', fn (Builder $projects) => $projects->accessibleTo(auth()->user()));
+                    });
+            })
             ->orderByDesc('start_date')
-            ->get(['id', 'team_id', 'name', 'start_date', 'end_date']);
+            ->get(['id', 'project_id', 'team_id', 'name', 'start_date', 'end_date']);
     }
 
     #[Computed]
@@ -358,10 +364,10 @@ new #[Layout('layouts.app')] #[Title('Tasks · TaskFlow')] class extends Compone
         </label>
         @if ($onlyAssignedToMe)
             <label>
-                <span class="sr-only">Filter by cycle</span>
+                <span class="sr-only">Filter by sprint</span>
                 <select wire:model.live="cycleFilter" class="min-h-10 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-700 shadow-sm focus:border-indigo-600 focus:ring-4 focus:ring-indigo-600/10 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200">
                     <option value="all">All sprints</option><option value="none">No sprint</option>
-                    @foreach ($this->availableCycles as $cycle)<option value="{{ $cycle->id }}">{{ $cycle->name }}</option>@endforeach
+                    @foreach ($this->availableCycles as $cycle)<option value="{{ $cycle->id }}">{{ $cycle->project_id ? 'Project' : 'Team' }} · {{ $cycle->name }}</option>@endforeach
                 </select>
             </label>
             <label class="flex min-h-10 items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-700 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200">

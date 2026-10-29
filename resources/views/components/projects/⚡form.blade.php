@@ -4,6 +4,7 @@ use App\Models\Project;
 use App\Models\ProjectStatus;
 use App\Models\User;
 use App\Support\RichText;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 use Livewire\Attributes\Layout;
@@ -163,7 +164,7 @@ new #[Layout('layouts.app')] #[Title('Project details · TaskFlow')] class exten
         if ($field === 'teamId') {
             $nextTeamId = blank($validated['teamId']) ? null : (int) $validated['teamId'];
 
-            if ($project->team_id !== $nextTeamId && $project->tasks()->whereNotNull('cycle_id')->exists()) {
+            if ($project->team_id !== $nextTeamId && $this->hasTasksInTeamCycles($project)) {
                 $this->addError('teamId', 'Move these tasks out of their current team cycles before changing the project team.');
 
                 return;
@@ -352,7 +353,7 @@ new #[Layout('layouts.app')] #[Title('Project details · TaskFlow')] class exten
             $this->authorize('update', $project);
 
             $nextTeamId = $validated['team_id'] ? (int) $validated['team_id'] : null;
-            if ($project->team_id !== $nextTeamId && $project->tasks()->whereNotNull('cycle_id')->exists()) {
+            if ($project->team_id !== $nextTeamId && $this->hasTasksInTeamCycles($project)) {
                 $this->addError('teamId', 'Move these tasks out of their current team cycles before changing the project team.');
 
                 return;
@@ -373,6 +374,16 @@ new #[Layout('layouts.app')] #[Title('Project details · TaskFlow')] class exten
         }
 
         $this->redirectRoute('projects.show', ['project' => $project]);
+    }
+
+    private function hasTasksInTeamCycles(Project $project): bool
+    {
+        return $project->team_id !== null
+            && $project->tasks()
+                ->whereHas('cycle', fn (Builder $cycle) => $cycle
+                    ->where('team_id', $project->team_id)
+                    ->whereNull('project_id'))
+                ->exists();
     }
 };
 ?>

@@ -2,10 +2,14 @@
 
 use App\Models\Project;
 use App\Models\ProjectStatus;
+use App\Models\Cycle;
 use App\Models\Task;
 use App\Models\TaskActivity;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Str;
+use Illuminate\Validation\Rule;
 use Livewire\Attributes\Computed;
 use Livewire\Attributes\Layout;
 use Livewire\Attributes\Locked;
@@ -17,11 +21,28 @@ new #[Layout('layouts.app')] #[Title('Project · TaskFlow')] class extends Compo
     #[Locked]
     public int $projectId;
 
+    public string $cycleName = '';
+
+    public string $cycleGoal = '';
+
+    public string $cycleStartDate = '';
+
+    public string $cycleEndDate = '';
+
+    public array $cycleGoals = [];
+
+    public array $rolloverTargets = [];
+
+    public ?string $cycleStatusMessage = null;
+
+    public string $cycleStatusType = 'success';
+
     public function mount(int $project): void
     {
         $record = Project::query()->accessibleTo(auth()->user())->findOrFail($project);
         $this->authorize('view', $record);
         $this->projectId = $record->id;
+        $this->cycleGoals = $record->cycles()->where('status', 'planned')->pluck('goal', 'id')->map(fn ($goal) => $goal ?? '')->all();
     }
 
     #[Computed]
@@ -160,6 +181,176 @@ new #[Layout('layouts.app')] #[Title('Project · TaskFlow')] class extends Compo
         $taskIds = $this->project->tasks()->select('id');
 
         return TaskActivity::query()->whereIn('task_id', $taskIds)->with(['actor:id,name', 'task:id,title'])->latest()->limit(8)->get();
+    }
+
+    #[Computed]
+    public function cycles(): Collection
+    {
+        return $this->project->cycles()
+            ->withCount([
+                'tasks',
+                'tasks as completed_tasks_count' => fn ($query) => $query->whereHas('status', fn (Builder $status) => $status->where('is_complete', true)),
+                'tasks as open_tasks_count' => fn ($query) => $query->whereHas('status', fn (Builder $status) => $status->where('is_complete', false)),
+            ])
+            ->withSum('tasks', 'story_points')
+            ->withSum(['tasks as completed_story_points' => fn ($query) => $query->whereHas('status', fn (Builder $status) => $status->where('is_complete', true))], 'story_points')
+            ->with(['snapshots' => fn ($query) => $query->orderBy('snapshot_date')->orderBy('created_at')])
+            ->get();
+    }
+
+    /**
+     * @return array{count: int, average: float}
+     */
+    #[Computed]
+    public function cycleVelocity(): array
+    {
+        $deliveredPoints = $this->cycles
+            ->where('status', 'completed')
+            ->map(fn (Cycle $cycle) => $cycle->snapshots->firstWhere('snapshot_type', 'completion')?->completed_story_points)
+            ->filter(fn (?int $points): bool => $points !== null);
+
+        return [
+            'count' => $deliveredPoints->count(),
+            'average' => $deliveredPoints->isEmpty() ? 0 : round($deliveredPoints->avg(), 1),
+        ];
+    }
+
+    public function createCycle(): void
+    {
+        $project = $this->project;
+        $this->authorize('update', $project);
+        $this->cycleName = trim($this->cycleName);
+        $validated = $this->validate([
+            'cycleName' => ['required', 'string', 'max:120', Rule::unique('cycles', 'name')->where('project_id', $project->id)],
+            'cycleGoal' => ['nullable', 'string', 'max:500'],
+            'cycleStartDate' => ['required', 'date'],
+            'cycleEndDate' => ['required', 'date', 'after_or_equal:cycleStartDate'],
+        ]);
+
+        $cycle = DB::transaction(function () use ($project, $validated): ?Cycle {
+            Project::query()->whereKey($project->id)->lockForUpdate()->firstOrFail();
+            $overlaps = $project->cycles()
+                ->whereDate('start_date', '<=', $validated['cycleEndDate'])
+                ->whereDate('end_date', '>=', $validated['cycleStartDate'])
+                ->exists();
+
+            if ($overlaps) {
+                return null;
+            }
+
+            return $project->cycles()->create([
+                'name' => $validated['cycleName'],
+                'goal' => filled($validated['cycleGoal'] ?? null) ? trim($validated['cycleGoal']) : null,
+                'start_date' => $validated['cycleStartDate'],
+                'end_date' => $validated['cycleEndDate'],
+            ]);
+        });
+
+        if ($cycle === null) {
+            $this->addError('cycleStartDate', 'Sprint dates cannot overlap another sprint for this project.');
+
+            return;
+        }
+
+        $this->cycleGoals[$cycle->id] = $cycle->goal ?? '';
+        $this->reset('cycleName', 'cycleGoal', 'cycleStartDate', 'cycleEndDate');
+        $this->cycleStatusMessage = 'Project sprint planned.';
+        $this->cycleStatusType = 'success';
+        unset($this->cycles, $this->cycleVelocity);
+    }
+
+    public function startCycle(int $cycleId): void
+    {
+        $project = $this->project;
+        $this->authorize('update', $project);
+        $cycle = $project->cycles()->findOrFail($cycleId);
+        abort_unless($cycle->status === 'planned', 422);
+
+        $goal = trim((string) ($this->cycleGoals[$cycleId] ?? $cycle->goal));
+
+        if ($goal === '') {
+            $this->addError('cycleGoals.'.$cycleId, 'Add a sprint goal before starting this sprint.');
+
+            return;
+        }
+
+        $this->cycleGoals[$cycleId] = $goal;
+        $this->validate(['cycleGoals.'.$cycleId => ['required', 'string', 'max:500']]);
+
+        if ($cycle->end_date->lt(today())) {
+            $this->cycleStatusMessage = 'This sprint has already passed. Update its dates before starting it.';
+            $this->cycleStatusType = 'error';
+
+            return;
+        }
+
+        $started = DB::transaction(function () use ($project, $cycle, $goal): bool {
+            Project::query()->whereKey($project->id)->lockForUpdate()->firstOrFail();
+
+            if ($project->cycles()->where('status', 'active')->exists()) {
+                return false;
+            }
+
+            $cycle->update(['goal' => $goal, 'status' => 'active', 'started_at' => now()]);
+            $cycle->recordSnapshot(today(), 'start');
+
+            return true;
+        });
+
+        if (! $started) {
+            $this->cycleStatusMessage = 'Complete the active project sprint before starting another one.';
+            $this->cycleStatusType = 'error';
+
+            return;
+        }
+
+        $this->cycleStatusMessage = $cycle->name.' started.';
+        $this->cycleStatusType = 'success';
+        unset($this->cycles, $this->cycleVelocity);
+    }
+
+    public function completeCycle(int $cycleId): void
+    {
+        $project = $this->project;
+        $this->authorize('update', $project);
+        $cycle = $project->cycles()->findOrFail($cycleId);
+        abort_unless($cycle->status === 'active', 422);
+
+        $target = (string) ($this->rolloverTargets[$cycleId] ?? 'backlog');
+        $allowedTargets = ['backlog', ...$project->cycles()
+            ->where('status', 'planned')
+            ->whereDate('end_date', '>=', today())
+            ->where('id', '!=', $cycle->id)
+            ->pluck('id')
+            ->map(fn ($id) => (string) $id)
+            ->all()];
+
+        if (! in_array($target, $allowedTargets, true)) {
+            $this->addError('rolloverTargets.'.$cycleId, 'Choose the backlog or an upcoming sprint from this project.');
+
+            return;
+        }
+
+        $openTaskCount = 0;
+        DB::transaction(function () use ($cycle, $target, &$openTaskCount): void {
+            $cycle->recordSnapshot(today(), 'completion');
+            $openTasks = $cycle->tasks()
+                ->whereHas('status', fn (Builder $status) => $status->where('is_complete', false))
+                ->get();
+            $openTaskCount = $openTasks->count();
+
+            foreach ($openTasks as $task) {
+                $task->update(['cycle_id' => $target === 'backlog' ? null : (int) $target]);
+            }
+
+            $cycle->update(['status' => 'completed', 'completed_at' => now()]);
+        });
+
+        $this->cycleStatusMessage = $openTaskCount === 0
+            ? $cycle->name.' completed.'
+            : $cycle->name.' completed. '.$openTaskCount.' open '.Str::plural('task', $openTaskCount).' moved to '.($target === 'backlog' ? 'the backlog' : 'the selected sprint').'.';
+        $this->cycleStatusType = 'success';
+        unset($this->cycles, $this->cycleVelocity);
     }
 };
 ?>
@@ -327,5 +518,141 @@ new #[Layout('layouts.app')] #[Title('Project · TaskFlow')] class extends Compo
                 @endif
             </article>
         </div>
+    </section>
+
+    <section class="mt-6 rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900" aria-labelledby="project-sprints-heading">
+        <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+                <h2 id="project-sprints-heading" class="text-lg font-semibold text-slate-900 dark:text-white">Project sprints</h2>
+                <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Plan and review sprints owned by this project, independently of team sprints.</p>
+            </div>
+            <div class="shrink-0 rounded-lg bg-indigo-50 px-3 py-2 text-sm dark:bg-indigo-500/10">
+                <span class="font-semibold text-indigo-700 dark:text-indigo-300">{{ $this->cycleVelocity['average'] }}</span>
+                <span class="text-indigo-700 dark:text-indigo-300"> average delivered points</span>
+                <span class="text-xs text-indigo-600 dark:text-indigo-400"> · {{ $this->cycleVelocity['count'] }} completed</span>
+            </div>
+        </div>
+
+        @if ($cycleStatusMessage)
+            <p role="status" @class(['mt-4 rounded-lg border px-3 py-2 text-sm', 'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300' => $cycleStatusType === 'success', 'border-red-200 bg-red-50 text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300' => $cycleStatusType === 'error'])>{{ $cycleStatusMessage }}</p>
+        @endif
+
+        @can('update', $this->project)
+            <form wire:submit="createCycle" class="mt-5 grid gap-3 rounded-lg bg-slate-50 p-4 sm:grid-cols-2 lg:grid-cols-5 dark:bg-slate-950">
+                <div>
+                    <label for="project-cycle-name" class="block text-xs font-medium text-slate-700 dark:text-slate-300">Sprint name</label>
+                    <input id="project-cycle-name" wire:model="cycleName" maxlength="120" required placeholder="Sprint 1" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-900 dark:text-white">
+                    @error('cycleName') <p class="mt-1 text-xs text-red-600 dark:text-red-400">{{ $message }}</p> @enderror
+                </div>
+                <div>
+                    <label for="project-cycle-goal" class="block text-xs font-medium text-slate-700 dark:text-slate-300">Sprint goal <span class="font-normal text-slate-500">(required to start)</span></label>
+                    <input id="project-cycle-goal" wire:model="cycleGoal" maxlength="500" placeholder="What outcome will this sprint deliver?" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-900 dark:text-white">
+                    @error('cycleGoal') <p class="mt-1 text-xs text-red-600 dark:text-red-400">{{ $message }}</p> @enderror
+                </div>
+                <div>
+                    <label for="project-cycle-start" class="block text-xs font-medium text-slate-700 dark:text-slate-300">Starts</label>
+                    <input id="project-cycle-start" type="date" wire:model="cycleStartDate" required class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-900 dark:text-white">
+                    @error('cycleStartDate') <p class="mt-1 text-xs text-red-600 dark:text-red-400">{{ $message }}</p> @enderror
+                </div>
+                <div>
+                    <label for="project-cycle-end" class="block text-xs font-medium text-slate-700 dark:text-slate-300">Ends</label>
+                    <input id="project-cycle-end" type="date" wire:model="cycleEndDate" required class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-900 dark:text-white">
+                    @error('cycleEndDate') <p class="mt-1 text-xs text-red-600 dark:text-red-400">{{ $message }}</p> @enderror
+                </div>
+                <div class="flex items-end">
+                    <button type="submit" wire:loading.attr="disabled" wire:target="createCycle" class="min-h-10 w-full rounded-lg bg-indigo-600 px-3 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-60"><span wire:loading.remove wire:target="createCycle">Plan sprint</span><span wire:loading wire:target="createCycle">Planning...</span></button>
+                </div>
+            </form>
+        @endif
+
+        @if ($this->cycles->isNotEmpty())
+            <ul class="mt-5 divide-y divide-slate-100 dark:divide-slate-800">
+                @foreach ($this->cycles as $cycle)
+                    <li wire:key="project-cycle-{{ $cycle->id }}" class="space-y-3 py-4">
+                        @php($completion = $cycle->tasks_count > 0 ? (int) round($cycle->completed_tasks_count / $cycle->tasks_count * 100) : 0)
+                        <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                            <div class="min-w-0 flex-1">
+                                <div class="flex flex-wrap items-center gap-2">
+                                    <p class="text-sm font-semibold text-slate-900 dark:text-white">{{ $cycle->name }}</p>
+                                    <span @class(['rounded-full px-2.5 py-1 text-xs font-semibold capitalize', 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300' => $cycle->status === 'active', 'bg-indigo-50 text-indigo-700 dark:bg-indigo-500/10 dark:text-indigo-300' => $cycle->status === 'planned', 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300' => $cycle->status === 'completed'])>{{ $cycle->status === 'planned' ? ($cycle->start_date->isFuture() ? 'upcoming' : 'planned') : ($cycle->status === 'active' ? 'active' : 'completed') }}</span>
+                                </div>
+                                <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">{{ $cycle->start_date->format('M j, Y') }} – {{ $cycle->end_date->format('M j, Y') }} · {{ $cycle->tasks_count }} {{ Str::plural('task', $cycle->tasks_count) }} · {{ $cycle->completed_tasks_count }} complete · {{ $cycle->open_tasks_count }} open</p>
+                                @if ($cycle->goal)
+                                    <p class="mt-2 text-sm text-slate-700 dark:text-slate-300"><span class="font-medium">Goal:</span> {{ $cycle->goal }}</p>
+                                @elseif ($cycle->status === 'planned')
+                                    <p class="mt-2 text-xs text-amber-700 dark:text-amber-300">Set a sprint goal before starting.</p>
+                                @endif
+                                <div class="mt-3 h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800" role="progressbar" aria-label="{{ $cycle->name }} task completion" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ $completion }}"><div class="h-full rounded-full bg-emerald-500 transition-all" style="width: {{ $completion }}%"></div></div>
+                                <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">{{ $completion }}% complete · {{ $cycle->tasks_sum_story_points ?? 0 }} planned points · {{ $cycle->completed_story_points ?? 0 }} completed points</p>
+                            </div>
+
+                            @can('update', $this->project)
+                                <div class="flex flex-wrap items-center gap-2">
+                                    @if ($cycle->status === 'planned')
+                                        <input aria-label="Goal for {{ $cycle->name }}" wire:model="cycleGoals.{{ $cycle->id }}" maxlength="500" placeholder="Sprint goal" @error('cycleGoals.'.$cycle->id) aria-invalid="true" @enderror class="min-h-9 min-w-48 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-950 dark:text-white">
+                                        <button type="button" wire:click="startCycle({{ $cycle->id }})" class="min-h-9 rounded-lg bg-indigo-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-indigo-700">Start sprint</button>
+                                        @error('cycleGoals.'.$cycle->id) <p class="w-full text-xs text-red-600 dark:text-red-400">{{ $message }}</p> @enderror
+                                    @elseif ($cycle->status === 'active')
+                                        <select aria-label="Move open tasks from {{ $cycle->name }} to" wire:model="rolloverTargets.{{ $cycle->id }}" class="min-h-9 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-950 dark:text-white">
+                                            <option value="backlog">Backlog</option>
+                                            @foreach ($this->cycles->where('status', 'planned')->where('end_date', '>=', today()) as $nextCycle)
+                                                @if ($nextCycle->id !== $cycle->id)<option value="{{ $nextCycle->id }}">{{ $nextCycle->name }}</option>@endif
+                                            @endforeach
+                                        </select>
+                                        <button type="button" wire:click="completeCycle({{ $cycle->id }})" wire:confirm="Complete {{ $cycle->name }} and move its open tasks to the selected destination?" class="min-h-9 rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800">Complete sprint</button>
+                                        @error('rolloverTargets.'.$cycle->id) <p class="w-full text-xs text-red-600 dark:text-red-400">{{ $message }}</p> @enderror
+                                    @endif
+                                </div>
+                            @endcan
+                        </div>
+
+                        @if ($cycle->status === 'completed' && $cycle->snapshots->isNotEmpty())
+                            @php($finalSnapshot = $cycle->snapshots->firstWhere('snapshot_type', 'completion') ?? $cycle->snapshots->last())
+                            <details class="rounded-lg border border-slate-200 dark:border-slate-700">
+                                <summary class="cursor-pointer px-3 py-2 text-sm font-semibold text-slate-700 dark:text-slate-200">Sprint report · {{ $finalSnapshot->completed_story_points }} points delivered</summary>
+                                <div class="overflow-x-auto border-t border-slate-200 dark:border-slate-700">
+                                    <table class="w-full min-w-[38rem] text-left text-xs">
+                                        <thead class="bg-slate-50 text-slate-500 dark:bg-slate-950 dark:text-slate-400"><tr><th class="px-3 py-2 font-medium">Date</th><th class="px-3 py-2 font-medium">Scope (points)</th><th class="px-3 py-2 font-medium">Completed (points)</th><th class="px-3 py-2 font-medium">Remaining</th><th class="px-3 py-2 font-medium">Tasks complete</th></tr></thead>
+                                        <tbody class="divide-y divide-slate-100 dark:divide-slate-800">
+                                            @php($previousSnapshot = null)
+                                            @foreach ($cycle->snapshots as $snapshot)
+                                                @php($scopeChange = $previousSnapshot ? $snapshot->total_story_points - $previousSnapshot->total_story_points : null)
+                                                <tr>
+                                                    <td class="whitespace-nowrap px-3 py-2 text-slate-700 dark:text-slate-300">{{ $snapshot->snapshot_date->format('M j') }} <span class="text-slate-500">{{ $snapshot->snapshot_type === 'start' ? '· start' : ($snapshot->snapshot_type === 'completion' ? '· final' : '') }}</span></td>
+                                                    <td class="px-3 py-2 text-slate-700 dark:text-slate-300">{{ $snapshot->total_story_points }} @if ($scopeChange !== null && $scopeChange !== 0)<span class="{{ $scopeChange > 0 ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400' }}">({{ $scopeChange > 0 ? '+' : '' }}{{ $scopeChange }})</span>@endif</td>
+                                                    <td class="px-3 py-2 text-slate-700 dark:text-slate-300">{{ $snapshot->completed_story_points }}</td>
+                                                    <td class="px-3 py-2 text-slate-700 dark:text-slate-300">{{ max(0, $snapshot->total_story_points - $snapshot->completed_story_points) }}</td>
+                                                    <td class="px-3 py-2 text-slate-700 dark:text-slate-300">{{ $snapshot->completed_tasks }} / {{ $snapshot->total_tasks }}</td>
+                                                </tr>
+                                                @php($previousSnapshot = $snapshot)
+                                            @endforeach
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </details>
+                        @endif
+                    </li>
+                @endforeach
+            </ul>
+        @else
+            <p class="mt-5 rounded-lg border border-dashed border-slate-300 px-4 py-8 text-center text-sm text-slate-500 dark:border-slate-700 dark:text-slate-400">No project sprints planned yet.</p>
+        @endif
+
+        @if ($this->cycleVelocity['count'] > 0)
+            <div class="mt-5 border-t border-slate-200 pt-4 dark:border-slate-800">
+                <h3 class="text-sm font-semibold text-slate-900 dark:text-white">Historical velocity</h3>
+                <ul class="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                    @foreach ($this->cycles->where('status', 'completed')->sortByDesc('completed_at')->take(6) as $completedCycle)
+                        @php($completionSnapshot = $completedCycle->snapshots->firstWhere('snapshot_type', 'completion'))
+                        @if ($completionSnapshot)
+                            <li wire:key="project-velocity-{{ $completedCycle->id }}" class="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2 text-sm dark:bg-slate-950">
+                                <span class="truncate text-slate-700 dark:text-slate-300">{{ $completedCycle->name }}</span>
+                                <span class="shrink-0 font-semibold tabular-nums text-slate-900 dark:text-white">{{ $completionSnapshot->completed_story_points }} pts</span>
+                            </li>
+                        @endif
+                    @endforeach
+                </ul>
+            </div>
+        @endif
     </section>
 </main>

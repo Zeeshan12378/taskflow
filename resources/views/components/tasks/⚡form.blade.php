@@ -67,11 +67,32 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
             return null;
         }
 
-        return $this->project->tasks()->with(['status', 'assignee'])->findOrFail($this->taskId);
+        return $this->project->tasks()->with(['status', 'assignee', 'cycle'])->findOrFail($this->taskId);
     }
 
     #[Computed]
-    public function canAssignCycle(): bool
+    public function visibleTaskCycle(): ?Cycle
+    {
+        $cycle = $this->task?->cycle;
+
+        if ($cycle?->project_id === $this->projectId) {
+            return $cycle;
+        }
+
+        if (
+            $cycle !== null
+            && $cycle->project_id === null
+            && $cycle->team_id === $this->project->team_id
+            && $this->canAssignTeamCycle
+        ) {
+            return $cycle;
+        }
+
+        return null;
+    }
+
+    #[Computed]
+    public function canAssignTeamCycle(): bool
     {
         return $this->project->team?->members->contains('id', auth()->id()) ?? false;
     }
@@ -79,16 +100,29 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
     #[Computed]
     public function availableCycles()
     {
-        if (! $this->canAssignCycle) {
-            return collect();
-        }
-
         $currentCycleId = $this->task?->cycle_id;
+        $canViewCurrentCycle = $currentCycleId !== null
+            && Cycle::query()
+                ->whereKey($currentCycleId)
+                ->where(function ($query): void {
+                    $query->where('project_id', $this->projectId);
+
+                    if ($this->canAssignTeamCycle && $this->project->team_id !== null) {
+                        $query->orWhere('team_id', $this->project->team_id);
+                    }
+                })
+                ->exists();
 
         return Cycle::query()
-            ->where('team_id', $this->project->team_id)
+            ->where(function ($query): void {
+                $query->where('project_id', $this->projectId);
+
+                if ($this->canAssignTeamCycle && $this->project->team_id !== null) {
+                    $query->orWhere('team_id', $this->project->team_id);
+                }
+            })
             ->where(fn ($query) => $query->where(fn ($query) => $query->whereIn('status', ['planned', 'active'])->whereDate('end_date', '>=', today()))
-                ->when($currentCycleId, fn ($query) => $query->orWhereKey($currentCycleId)))
+                ->when($canViewCurrentCycle, fn ($query) => $query->orWhereKey($currentCycleId)))
             ->orderBy('start_date')
             ->get();
     }
@@ -280,7 +314,7 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
             'githubUrl' => ['githubUrl' => $this->githubUrlRules()],
             'assigneeId' => ['assigneeId' => ['nullable', 'integer', Rule::in($project->accessibleMemberIds())]],
             'reviewerId' => ['reviewerId' => [$currentStatus?->requiresReviewer() ? 'required' : 'nullable', 'integer', Rule::in($project->accessibleMemberIds())]],
-            'cycleId' => ['cycleId' => ['nullable', 'integer', Rule::exists('cycles', 'id')->where('team_id', $project->team_id)->where(fn ($query) => $query->where(fn ($query) => $query->whereIn('status', ['planned', 'active'])->whereDate('end_date', '>=', today()))->orWhere('id', $task->cycle_id ?? 0))]],
+            'cycleId' => ['cycleId' => ['nullable', 'integer', ...$this->cycleAssignmentRules($project, $task->cycle_id)]],
             'storyPoints' => ['storyPoints' => ['nullable', 'integer', Rule::in([1, 2, 3, 5, 8, 13, 21])]],
             'blockedReason' => ['blockedReason' => [strtolower((string) $currentStatus?->name) === 'blocked' ? 'required' : 'nullable', 'string', 'max:10000']],
         };
@@ -343,7 +377,7 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
         $this->blockedReason = trim(RichText::sanitize($this->blockedReason));
         $statusIsBlocked = strtolower((string) $project->statuses()->whereKey($this->statusId)->value('name')) === 'blocked';
         $targetStatus = $project->statuses()->whereKey($this->statusId)->first();
-        $canAssignCycle = $project->team?->members->contains('id', auth()->id()) ?? false;
+        $canAssignTeamCycle = $project->team?->members->contains('id', auth()->id()) ?? false;
         $currentStatusId = $this->taskId === null ? null : $project->tasks()->whereKey($this->taskId)->value('project_status_id');
         $currentCycleId = $this->taskId === null ? null : $project->tasks()->whereKey($this->taskId)->value('cycle_id');
         $isEnteringReview = $targetStatus?->requiresReviewer()
@@ -367,9 +401,7 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
             'reviewerId' => [$isEnteringReview ? 'required' : 'nullable', 'integer', Rule::in($project->accessibleMemberIds())],
         ];
 
-        if ($canAssignCycle) {
-            $rules['cycleId'] = ['nullable', 'integer', Rule::exists('cycles', 'id')->where('team_id', $project->team_id)->where(fn ($query) => $query->where(fn ($query) => $query->whereIn('status', ['planned', 'active'])->whereDate('end_date', '>=', today()))->orWhere('id', $currentCycleId ?? 0))];
-        }
+        $rules['cycleId'] = ['nullable', 'integer', ...$this->cycleAssignmentRules($project, $currentCycleId)];
 
         $validated = $this->validate($rules);
 
@@ -405,9 +437,7 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
             'reviewer_id' => $validated['reviewerId'] ?: null,
         ];
 
-        if ($canAssignCycle) {
-            $attributes['cycle_id'] = $validated['cycleId'] ?: null;
-        }
+        $attributes['cycle_id'] = $validated['cycleId'] ?: null;
 
         if ($this->taskId !== null) {
             $task = $project->tasks()->findOrFail($this->taskId);
@@ -451,6 +481,28 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
                     $fail('The GitHub reference must be an https://github.com URL.');
                 }
             },
+        ];
+    }
+
+    /**
+     * @return array<int, \Illuminate\Validation\Rules\Exists>
+     */
+    private function cycleAssignmentRules(Project $project, ?int $currentCycleId): array
+    {
+        return [
+            Rule::exists('cycles', 'id')->where(function ($query) use ($project, $currentCycleId): void {
+                $query->where('project_id', $project->id);
+
+                if ($project->team_id !== null && $this->canAssignTeamCycle) {
+                    $query->orWhere('team_id', $project->team_id);
+                }
+
+                if ($currentCycleId !== null) {
+                    $query->orWhere('id', $currentCycleId);
+                }
+            })->where(fn ($query) => $query
+                ->where(fn ($query) => $query->whereIn('status', ['planned', 'active'])->whereDate('end_date', '>=', today()))
+                ->when($currentCycleId !== null, fn ($query) => $query->orWhere('id', $currentCycleId))),
         ];
     }
 };
@@ -514,9 +566,7 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
                 <div class="grid grid-cols-[6.75rem_minmax(0,1fr)] items-center gap-3 py-3"><dt class="text-sm text-slate-600 dark:text-slate-400">GitHub reference</dt><dd class="min-w-0">@if ($editingDetailField === 'githubUrl')<div class="flex min-w-0 items-center gap-1.5"><input type="url" wire:model="githubUrl" aria-label="GitHub reference URL" placeholder="https://github.com/owner/repo/pull/123" class="min-w-0 flex-1 rounded-md border border-indigo-300 bg-white px-2 py-1.5 text-sm dark:border-indigo-700 dark:bg-slate-950 dark:text-white"><button type="button" wire:click="saveDetailField('githubUrl')" aria-label="Save GitHub reference" class="rounded-md bg-indigo-600 px-2 py-1 text-white">✓</button><button type="button" wire:click="cancelDetailField('githubUrl')" aria-label="Cancel GitHub reference edit" class="rounded-md border border-slate-300 px-2 py-1 text-slate-600 dark:border-slate-700 dark:text-slate-300">×</button></div>@else<div class="flex min-w-0 items-center gap-1">@if ($this->task->github_url)<a href="{{ $this->task->github_url }}" target="_blank" rel="noopener noreferrer" class="min-w-0 flex-1 truncate rounded-md px-2 py-1.5 text-sm text-indigo-600 hover:underline dark:text-indigo-400">{{ $this->task->github_url }}</a>@else<span class="min-w-0 flex-1 truncate px-2 py-1.5 text-sm text-slate-500 dark:text-slate-400">No GitHub reference</span>@endif<button type="button" wire:click="editDetailField('githubUrl')" aria-label="Edit GitHub reference" class="rounded-md px-2 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800">Edit</button></div>@endif @error('githubUrl')<p class="mt-1 text-xs text-red-600">{{ $message }}</p>@enderror</dd></div>
                 <div class="grid grid-cols-[6.75rem_minmax(0,1fr)] items-center gap-3 py-3"><dt class="text-sm text-slate-600 dark:text-slate-400">Reviewer</dt><dd class="min-w-0">@if ($editingDetailField === 'reviewerId')<div class="flex min-w-0 items-center gap-1.5"><select wire:model="reviewerId" aria-label="Task reviewer" class="min-w-0 flex-1 rounded-md border border-indigo-300 bg-white px-2 py-1.5 text-sm dark:border-indigo-700 dark:bg-slate-950 dark:text-white"><option value="">No reviewer</option>@foreach ($this->project->accessibleMembers() as $member)<option value="{{ $member->id }}">{{ $member->name }}</option>@endforeach</select><button type="button" wire:click="saveDetailField('reviewerId')" aria-label="Save reviewer" class="rounded-md bg-indigo-600 px-2 py-1 text-white">✓</button><button type="button" wire:click="cancelDetailField('reviewerId')" aria-label="Cancel reviewer edit" class="rounded-md border border-slate-300 px-2 py-1 text-slate-600 dark:border-slate-700 dark:text-slate-300">×</button></div>@else<button type="button" wire:click="editDetailField('reviewerId')" class="w-full truncate rounded-md px-2 py-1.5 text-left text-sm text-slate-800 hover:bg-slate-50 dark:text-slate-200 dark:hover:bg-slate-800">{{ $this->task->reviewer?->name ?? 'Unassigned' }}</button>@endif @error('reviewerId')<p class="mt-1 text-xs text-red-600">{{ $message }}</p>@enderror</dd></div>
                 <div class="grid grid-cols-[6.75rem_minmax(0,1fr)] items-center gap-3 py-3"><dt class="text-sm text-slate-600 dark:text-slate-400">Reporter</dt><dd class="truncate px-2 py-1.5 text-sm text-slate-800 dark:text-slate-200">{{ $this->task->user?->name ?? 'Former member' }}</dd></div>
-                @if ($this->canAssignCycle)
-                    <div class="grid grid-cols-[6.75rem_minmax(0,1fr)] items-center gap-3 py-3"><dt class="text-sm text-slate-600 dark:text-slate-400">Sprint</dt><dd class="min-w-0">@if ($editingDetailField === 'cycleId')<div class="flex min-w-0 items-center gap-1.5"><select wire:model="cycleId" aria-label="Task sprint" class="min-w-0 flex-1 rounded-md border border-indigo-300 bg-white px-2 py-1.5 text-sm dark:border-indigo-700 dark:bg-slate-950 dark:text-white"><option value="">No sprint</option>@foreach ($this->availableCycles as $cycle)<option value="{{ $cycle->id }}">{{ $cycle->name }}</option>@endforeach</select><button type="button" wire:click="saveDetailField('cycleId')" aria-label="Save sprint" class="rounded-md bg-indigo-600 px-2 py-1 text-white">✓</button><button type="button" wire:click="cancelDetailField('cycleId')" aria-label="Cancel sprint edit" class="rounded-md border border-slate-300 px-2 py-1 text-slate-600 dark:border-slate-700 dark:text-slate-300">×</button></div>@else<button type="button" wire:click="editDetailField('cycleId')" class="w-full truncate rounded-md px-2 py-1.5 text-left text-sm text-indigo-600 hover:bg-slate-50 dark:text-indigo-400 dark:hover:bg-slate-800">{{ $this->task->cycle?->name ?? 'Add to sprint' }}</button>@endif @error('cycleId')<p class="mt-1 text-xs text-red-600">{{ $message }}</p>@enderror</dd></div>
-                @endif
+                <div class="grid grid-cols-[6.75rem_minmax(0,1fr)] items-center gap-3 py-3"><dt class="text-sm text-slate-600 dark:text-slate-400">Sprint</dt><dd class="min-w-0">@if ($editingDetailField === 'cycleId')<div class="flex min-w-0 items-center gap-1.5"><select wire:model="cycleId" aria-label="Task sprint" class="min-w-0 flex-1 rounded-md border border-indigo-300 bg-white px-2 py-1.5 text-sm dark:border-indigo-700 dark:bg-slate-950 dark:text-white"><option value="">No sprint</option>@foreach ($this->availableCycles as $cycle)<option value="{{ $cycle->id }}">{{ $cycle->project_id ? 'Project' : 'Team' }} · {{ $cycle->name }}</option>@endforeach</select><button type="button" wire:click="saveDetailField('cycleId')" aria-label="Save sprint" class="rounded-md bg-indigo-600 px-2 py-1 text-white">✓</button><button type="button" wire:click="cancelDetailField('cycleId')" aria-label="Cancel sprint edit" class="rounded-md border border-slate-300 px-2 py-1 text-slate-600 dark:border-slate-700 dark:text-slate-300">×</button></div>@else<button type="button" wire:click="editDetailField('cycleId')" class="w-full truncate rounded-md px-2 py-1.5 text-left text-sm text-indigo-600 hover:bg-slate-50 dark:text-indigo-400 dark:hover:bg-slate-800">{{ $this->visibleTaskCycle?->name ?? 'Add to sprint' }}</button>@endif @error('cycleId')<p class="mt-1 text-xs text-red-600">{{ $message }}</p>@enderror</dd></div>
                 <div class="grid grid-cols-[6.75rem_minmax(0,1fr)] items-start gap-3 py-3"><dt class="pt-1 text-sm text-slate-600 dark:text-slate-400">Blocked reason</dt><dd class="min-w-0">@if ($editingDetailField === 'blockedReason')<div class="space-y-2"><x-rich-text-editor model="blockedReason" :value="$blockedReason" id="inlineBlockedReason" label="Blocked reason" placeholder="What is blocking this task?" min-height="5rem" compact /><div class="flex justify-end gap-1.5"><button type="button" wire:click="saveDetailField('blockedReason')" aria-label="Save blocked reason" class="rounded-md bg-indigo-600 px-2 py-1 text-white">✓</button><button type="button" wire:click="cancelDetailField('blockedReason')" aria-label="Cancel blocked reason edit" class="rounded-md border border-slate-300 px-2 py-1 text-slate-600 dark:border-slate-700 dark:text-slate-300">×</button></div></div>@else<button type="button" wire:click="editDetailField('blockedReason')" class="rich-text-output w-full whitespace-pre-line rounded-md px-2 py-1.5 text-left text-sm text-slate-700 hover:bg-slate-50 dark:text-slate-300 dark:hover:bg-slate-800">{!! \App\Support\RichText::sanitize($this->task->blocked_reason) ?: 'Add blocked reason' !!}</button>@endif @error('blockedReason')<p class="mt-1 text-xs text-red-600">{{ $message }}</p>@enderror</dd></div>
                 <div class="grid grid-cols-[6.75rem_minmax(0,1fr)] items-center gap-3 py-3"><dt class="text-sm text-slate-600 dark:text-slate-400">Estimate</dt><dd class="min-w-0">@if ($editingDetailField === 'storyPoints')<div class="flex min-w-0 items-center gap-1.5"><select wire:model="storyPoints" aria-label="Story point estimate" class="min-w-0 flex-1 rounded-md border border-indigo-300 bg-white px-2 py-1.5 text-sm dark:border-indigo-700 dark:bg-slate-950 dark:text-white"><option value="">No estimate</option>@foreach ([1, 2, 3, 5, 8, 13, 21] as $points)<option value="{{ $points }}">{{ $points }} points</option>@endforeach</select><button type="button" wire:click="saveDetailField('storyPoints')" aria-label="Save estimate" class="rounded-md bg-indigo-600 px-2 py-1 text-white">✓</button><button type="button" wire:click="cancelDetailField('storyPoints')" aria-label="Cancel estimate edit" class="rounded-md border border-slate-300 px-2 py-1 text-slate-600 dark:border-slate-700 dark:text-slate-300">×</button></div>@else<button type="button" wire:click="editDetailField('storyPoints')" class="w-full rounded-md px-2 py-1.5 text-left text-sm text-slate-800 hover:bg-slate-50 dark:text-slate-200 dark:hover:bg-slate-800">{{ $this->task->story_points ? $this->task->story_points.' points' : 'Add estimate' }}</button>@endif @error('storyPoints')<p class="mt-1 text-xs text-red-600">{{ $message }}</p>@enderror</dd></div>
             </dl>
@@ -618,18 +668,16 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
                 </select>
                 @error('reviewerId') <p id="reviewer-error" class="mt-1.5 text-sm text-red-600 dark:text-red-400">Choose a project member before moving this task into review.</p> @enderror
             </div>
-            @if ($this->canAssignCycle)
-                <div>
-                    <label for="cycleId" class="block text-sm font-medium text-slate-900 dark:text-slate-200">Team sprint <span class="font-normal text-slate-500">(optional)</span></label>
-                    <select id="cycleId" wire:model="cycleId" @error('cycleId') aria-describedby="cycle-error" aria-invalid="true" @enderror class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-sm outline-none focus:border-indigo-600 focus:ring-4 focus:ring-indigo-600/10 dark:border-slate-700 dark:bg-slate-950 dark:text-white">
-                        <option value="">No sprint</option>
-                        @foreach ($this->availableCycles as $cycle)
-                            <option value="{{ $cycle->id }}">{{ $cycle->name }} · {{ $cycle->start_date->format('M j') }}–{{ $cycle->end_date->format('M j') }}</option>
-                        @endforeach
-                    </select>
-                    @error('cycleId') <p id="cycle-error" class="mt-1.5 text-sm text-red-600 dark:text-red-400">Choose an active or upcoming sprint from this team.</p> @enderror
-                </div>
-            @endif
+            <div>
+                <label for="cycleId" class="block text-sm font-medium text-slate-900 dark:text-slate-200">Sprint <span class="font-normal text-slate-500">(optional)</span></label>
+                <select id="cycleId" wire:model="cycleId" @error('cycleId') aria-describedby="cycle-error" aria-invalid="true" @enderror class="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-sm outline-none focus:border-indigo-600 focus:ring-4 focus:ring-indigo-600/10 dark:border-slate-700 dark:bg-slate-950 dark:text-white">
+                    <option value="">No sprint</option>
+                    @foreach ($this->availableCycles as $cycle)
+                        <option value="{{ $cycle->id }}">{{ $cycle->project_id ? 'Project' : 'Team' }} · {{ $cycle->name }} · {{ $cycle->start_date->format('M j') }}–{{ $cycle->end_date->format('M j') }}</option>
+                    @endforeach
+                </select>
+                @error('cycleId') <p id="cycle-error" class="mt-1.5 text-sm text-red-600 dark:text-red-400">Choose an active or upcoming sprint available to this project.</p> @enderror
+            </div>
         </div>
 
         <div>

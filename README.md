@@ -9,14 +9,15 @@ For an AI-oriented architecture and continuation guide, read [docs/AI_HANDOFF.md
 - Session-based registration, login, logout, profile, and account settings, including theme preference.
 - Dashboard with project and task summaries.
 - Teams with owners, admins, and members. Team members inherit access to team projects; projects can also grant direct access.
-- Projects with overview, board, list, calendar, reports, and settings views. Reports include task distributions, recent activity and completion trends. Projects have configurable workflow columns and a completion column.
+- Projects with overview, board, list, sprint-grouped task list, calendar, reports, and settings views. Reports include task distributions, recent activity and completion trends. Projects have configurable workflow columns and a completion column.
 - Task types (`task`, `bug`, `feature`), priorities (`low`, `medium`, `high`, `urgent`), due dates, blocked reasons, assignees, reviewers, and story point estimates on the Fibonacci scale (1–21).
 - Optional HTTPS GitHub references on tasks, restricted to `github.com` URLs and recorded in task activity.
-- Board search and filters for workflow status, type, priority, due dates, date ranges, assignee, reviewer, reporter, cycle, and blocked tasks.
+- Board search and filters for workflow status, type, priority, due dates, date ranges, assignee, reviewer, reporter, sprint, and blocked tasks.
 - Task detail modal with inline field editing, comments, activity history, and in-app notifications for task events.
-- Team sprint planning with dates, a sprint goal, and overlap validation. Managers start and complete sprints, only one sprint can be active per team, and unfinished tasks can roll to backlog or another planned sprint. Sprint overview shows task and estimate completion. Tasks on team projects can be assigned to active or upcoming sprints.
+- Independent team and project sprint planning with dates, goals, and overlap validation. Managers start and complete sprints, with at most one active sprint per team and per project, and unfinished tasks can roll to backlog or another planned sprint. Project sprints are visible to project members; team sprints remain limited to team members. Accessible project and team sprint choices are available on project boards and task forms.
+- Sprint reports with a start baseline, daily scope/progress snapshots, completion snapshots, and historical delivered-point velocity. Configure the host to run `php artisan schedule:run` every minute for daily samples.
 - Reusable rich-text editor for task, project, and team descriptions, blocked reasons, and comments. It supports formatting, lists, headings, tables, code blocks, emoji, links, text colors, and images by URL. HTML is sanitized server-side; the editor does not upload files.
-- Feature and unit tests, including authorization, validation, team cycles, notifications, and rich-text sanitization.
+- Feature and unit tests, including authorization, validation, team and project sprints, notifications, and rich-text sanitization.
 
 ## Requirements
 
@@ -71,6 +72,7 @@ php artisan route:list
 php artisan migrate:status
 php artisan test --compact
 npm run build
+php artisan schedule:list
 ```
 
 The test suite uses SQLite in memory through `phpunit.xml` and `RefreshDatabase`; tests do not require resetting the developer's local database.
@@ -88,6 +90,7 @@ The test suite uses SQLite in memory through `phpunit.xml` and `RefreshDatabase`
 | `/projects/{project}` | Project overview |
 | `/projects/{project}/board` | Workflow board and task detail modal |
 | `/projects/{project}/list`, `/calendar` | Alternative project views |
+| `/projects/{project}/sprints` | Tasks grouped by each accessible sprint and backlog |
 | `/projects/{project}/reports` | Project task, status, assignee, and completion reports |
 | `/projects/{project}/edit` | Project settings |
 | `/tasks`, `/my-tasks` | Task list and filters |

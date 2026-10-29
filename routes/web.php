@@ -45,6 +45,10 @@ Route::livewire('/projects/{project}/list', 'projects.list')
     ->middleware('auth')
     ->name('projects.list');
 
+Route::livewire('/projects/{project}/sprints', 'projects.sprints')
+    ->middleware('auth')
+    ->name('projects.sprints');
+
 Route::livewire('/projects/{project}/calendar', 'projects.calendar')
     ->middleware('auth')
     ->name('projects.calendar');

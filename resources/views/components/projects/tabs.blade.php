@@ -6,6 +6,7 @@
             'overview' => ['Overview', 'projects.show'],
             'board' => ['Board', 'projects.board'],
             'list' => ['List', 'projects.list'],
+            'sprints' => ['Sprints', 'projects.sprints'],
             'calendar' => ['Calendar', 'projects.calendar'],
             'reports' => ['Reports', 'projects.reports'],
             'settings' => ['Settings', 'projects.edit'],

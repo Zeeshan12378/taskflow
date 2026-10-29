@@ -4,9 +4,9 @@ This document gives a coding assistant enough context to continue TaskFlow witho
 
 ## Product and current state
 
-TaskFlow is an internal project and task-management application for software teams. It supports task planning and delivery across projects, teams, review, QA, and team sprints. The product is being built incrementally. Make one small, reviewable change at a time.
+TaskFlow is an internal project and task-management application for software teams. It supports task planning and delivery across projects, teams, review, QA, team sprints, and independently owned project sprints. The product is being built incrementally. Make one small, reviewable change at a time.
 
-The core application is implemented: authentication, projects, teams and sharing, configurable project workflows, task management, project views, task collaboration, in-app notifications, and a team sprint lifecycle. Tasks can store one optional HTTPS GitHub reference, restricted to `github.com`, and changes appear in the task activity timeline. The UI has a project sidebar and project-level Overview, Board, List, Calendar, Reports, and Settings views. Reports use task activity for recent completion and update metrics, and current project task data for distributions, trends, and cycle/lead times. Board tasks open in a detail modal; task fields are shown as previews and edited one field at a time. Task creation can happen in a modal from the board.
+The core application is implemented: authentication, projects, teams and sharing, configurable project workflows, task management, project views, task collaboration, in-app notifications, and team/project sprint lifecycles. Tasks can store one optional HTTPS GitHub reference, restricted to `github.com`, and changes appear in the task activity timeline. Sprint reports store a baseline at start, daily snapshots for active sprints, and a final snapshot before rollover; daily snapshots are recorded by `cycles:snapshot-active`, scheduled at 23:55, so production must run Laravel's scheduler. Team and project sprint reports include delivered-point history and average velocity. The UI has a project sidebar and project-level Overview, Board, List, Sprints, Calendar, Reports, and Settings views. The Sprints tab groups project tasks by project-owned sprints, team sprints the viewer can access, and a backlog/other group; it does not expose team sprint names to direct project members. Reports use task activity for recent completion and update metrics, and current project task data for distributions, trends, and cycle/lead times. Board tasks open in a detail modal; task fields are shown as previews and edited one field at a time. Task creation can happen in a modal from the board.
 
 The current editor is a dependency-free, contenteditable Blade component with formatting, paragraph/heading styles, lists, text colors, tables, code blocks, emoji, links, undo/redo, slash-command insertion, and image URLs. It is used for task/project/team descriptions, blocked reasons, and comments. Rich text is sanitized on the server. Images and attachments are URL references; there is no upload/storage flow.
 
@@ -37,7 +37,7 @@ PHP namespaces use the normal Laravel autoloading rules (`App\\` maps to `app/`)
 - Effective project access is owner OR team member OR direct project member. `Project::scopeAccessibleTo()` is the standard list-query scope; `Project::isAccessibleBy()` checks one project.
 - Project management is limited to the owner, team managers, and direct project admins. Team membership/settings are managed by the team owner/admin. Check the policies before changing a permission rule.
 - Task assignees and reviewers must be selected from the project owner, team members, or direct project members.
-- Directly shared project members do not automatically get team-cycle access. The cycle UI and task cycle assignment are restricted to members of the project's team.
+- Project sprints belong to a project and are accessible to its project members. Team sprints remain restricted to members of the project's team; direct project sharing does not grant team sprint access.
 
 ### Project workflow and tasks
 
@@ -45,18 +45,18 @@ PHP namespaces use the normal Laravel autoloading rules (`App\\` maps to `app/`)
 - Current default workflow is defined by `Project::DEFAULT_WORKFLOW_STATUSES`: To Do, In Progress, Complete, Verify, Closed, Blocked. The defaults mark Complete and Closed as complete; project settings let a manager choose a completion column, which makes that the single completion stage.
 - Tasks use types `task`, `bug`, `feature`; priorities `low`, `medium`, `high`, `urgent`.
 - Blocked tasks require a blocked reason. Leaving Blocked clears the reason in the current task workflow. A status that `ProjectStatus::requiresReviewer()` recognizes (Verify, In Review, QA, Quality Assurance) requires a reviewer on entry.
-- Tasks can have a due date, assignee, reviewer, optional team sprint, and story point estimate (1, 2, 3, 5, 8, 13, or 21). Estimates are validated, guarded by SQLite triggers, tracked in activity, and aggregated into sprint progress.
-- Team sprint choices are active or upcoming sprints from the same team; existing task assignments can be preserved after a sprint completes.
+- Tasks can have a due date, assignee, reviewer, optional team or project sprint, and story point estimate (1, 2, 3, 5, 8, 13, or 21). Estimates are validated, guarded by SQLite triggers, tracked in activity, and aggregated into sprint progress.
+- Project sprint choices are active or upcoming sprints from that project. Team sprint choices are active or upcoming sprints from the project's team and only appear to team members; existing task assignments can be preserved after a sprint completes.
 - Task deletion is restricted to the creator or project manager. Project members can view/update and comment on tasks they can access.
 - Task create/update events write activity records and can send database notifications to relevant participants. Do not bypass model hooks casually; if bulk updates are introduced, preserve equivalent activity/notification behavior intentionally.
 
-### Team sprints / cycles
+### Team and project sprints / cycles
 
-- A cycle belongs to one team and has a name, optional goal while planned, start/end dates, status (`planned`, `active`, `completed`), and lifecycle timestamps.
-- Sprint dates must not overlap. A sprint goal is required to start; team managers start and complete sprints; only one sprint can be active for a team.
-- Completing a sprint moves tasks in non-complete workflow statuses to backlog or a selected upcoming sprint. Tasks in a project completion status remain attached to the completed sprint for reporting. Rollover updates use Eloquent so task activity and notifications run.
-- Sprint overview aggregates current task and estimate completion. Historical daily burndown and immutable velocity snapshots are not implemented; per-day scope/progress is not stored.
-- Direct project members cannot access or change team sprint assignments. Project team changes are restricted while tasks remain assigned to incompatible sprints.
+- A cycle belongs to exactly one team or one project and has a name, optional goal while planned, start/end dates, status (`planned`, `active`, `completed`), and lifecycle timestamps. `team_id` is nullable for project-owned cycles; `project_id` is nullable for team-owned cycles.
+- Sprint dates cannot overlap within their owner. A sprint goal is required to start; team managers manage team sprints, project managers manage project sprints, and each team/project can have at most one active sprint independently.
+- Completing a sprint moves tasks in non-complete workflow statuses to backlog or a selected upcoming sprint from the same owner. Tasks in a project completion status remain attached to the completed sprint for reporting. Rollover updates use Eloquent so task activity and notifications run.
+- Sprint overview aggregates current task and estimate completion. Sprint start, daily, and completion snapshots retain immutable task/point scope and completion totals; daily snapshots are recorded at 23:55 by the scheduler. Reports show daily remaining work, scope changes, and delivered points. Historical snapshots are not backfilled for sprints completed before this feature, and changes between daily captures are not retained.
+- Team and project reports show completed-sprint delivered-point history and the average delivered points. Direct project members cannot access or change team sprint assignments. Project team changes are restricted while tasks remain assigned to incompatible sprints.
 
 ### Comments, activity, and notifications
 
@@ -80,11 +80,11 @@ Authenticated routes include:
 
 - `/dashboard`
 - `/teams`, `/teams/{team}` (team access/settings and cycle management)
-- `/projects`, `/projects/create`, `/projects/{project}` (overview), `/projects/{project}/board`, `/list`, `/calendar`, `/reports`, `/edit`
+- `/projects`, `/projects/create`, `/projects/{project}` (overview), `/projects/{project}/board`, `/list`, `/sprints`, `/calendar`, `/reports`, `/edit`
 - `/projects/{project}/tasks/create`, `/projects/{project}/tasks/{task}/edit`
 - `/tasks`, `/my-tasks`, `/notifications`, `/profile`, `/settings`
 
-The project overview includes delivery metrics, workflow distribution, completion, overdue/due-soon counts, and recent project activity. The project board includes search and combined filters for priority, due date/preset and date range, type, assignee, reviewer, workflow status, reporter, cycle (when the viewer has team membership), and blocked tasks. The global task list has project, status, priority, type, due-date, and text search filters. Verify filter scoping when adding more options.
+The project overview includes delivery metrics, workflow distribution, completion, overdue/due-soon counts, recent project activity, project sprint management, and project sprint velocity. The dedicated project Sprints tab groups tasks by project sprints and team sprints only when the viewer belongs to that team; remaining tasks appear in a backlog/other group without revealing restricted sprint details. The project board includes search and combined filters for priority, due date/preset and date range, type, assignee, reviewer, workflow status, reporter, project sprints, accessible team sprints, and blocked tasks. The global task list exposes sprint filtering for sprints belonging to accessible projects and teams. Verify filter scoping when adding more options.
 
 ## Authorization and data safety checklist
 
@@ -126,8 +126,7 @@ The current app has sprint planning/lifecycle and aggregate progress, project re
 
 Potential next increments, after checking the live code and tests:
 
-1. Historical sprint reports (burndown, scope changes, velocity) after defining and storing immutable snapshots or sufficient task history.
-2. Reusable project/task templates and recurring task creation if the team confirms a real workflow need.
-3. Optional GitHub pull request status sync, time tracking, and more advanced automations only after defining the smallest useful workflow and permission model.
+1. Reusable project/task templates and recurring task creation if the team confirms a real workflow need.
+2. Optional GitHub pull request status sync, time tracking, and more advanced automations only after defining the smallest useful workflow and permission model.
 
 Do not implement a whole roadmap in one change. First inspect the relevant current implementation, then choose one bounded feature and define its acceptance criteria and tests.

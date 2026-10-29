@@ -48,9 +48,9 @@ class ProjectsTest extends TestCase
         ]);
         $otherProject = $otherUser->projects()->create(['name' => 'Private workspace']);
 
-        foreach (['projects.show', 'projects.board', 'projects.list', 'projects.calendar', 'projects.reports', 'projects.edit'] as $view) {
+        foreach (['projects.show', 'projects.board', 'projects.list', 'projects.sprints', 'projects.calendar', 'projects.reports', 'projects.edit'] as $view) {
             $response = $this->actingAs($user)->get(route($view, $project));
-            $response->assertOk()->assertSee('Overview')->assertSee('Board')->assertSee('List')->assertSee('Calendar')->assertSee('Reports')->assertSee('Settings');
+            $response->assertOk()->assertSee('Overview')->assertSee('Board')->assertSee('List')->assertSee('Sprints')->assertSee('Calendar')->assertSee('Reports')->assertSee('Settings');
             $response->assertDontSee('Private workspace', false);
         }
 
@@ -58,6 +58,7 @@ class ProjectsTest extends TestCase
         $this->get(route('projects.calendar', $project))->assertSee('Due this month');
 
         $this->get(route('projects.list', $otherProject))->assertNotFound();
+        $this->get(route('projects.sprints', $otherProject))->assertNotFound();
         $this->get(route('projects.calendar', $otherProject))->assertNotFound();
     }
 

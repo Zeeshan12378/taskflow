@@ -107,7 +107,25 @@ new #[Layout('layouts.app')] #[Title('Team · TaskFlow')] class extends Componen
             ])
             ->withSum('tasks', 'story_points')
             ->withSum(['tasks as completed_story_points' => fn ($query) => $query->whereHas('status', fn ($status) => $status->where('is_complete', true))], 'story_points')
+            ->with(['snapshots' => fn ($query) => $query->orderBy('snapshot_date')->orderBy('created_at')])
             ->get();
+    }
+
+    /**
+     * @return array{count: int, average: float}
+     */
+    #[Computed]
+    public function cycleVelocity(): array
+    {
+        $deliveredPoints = $this->cycles
+            ->where('status', 'completed')
+            ->map(fn (Cycle $cycle) => $cycle->snapshots->firstWhere('snapshot_type', 'completion')?->completed_story_points)
+            ->filter(fn (?int $points): bool => $points !== null);
+
+        return [
+            'count' => $deliveredPoints->count(),
+            'average' => $deliveredPoints->isEmpty() ? 0 : round($deliveredPoints->avg(), 1),
+        ];
     }
 
     public function createCycle(): void
@@ -146,7 +164,7 @@ new #[Layout('layouts.app')] #[Title('Team · TaskFlow')] class extends Componen
         $this->reset('cycleName', 'cycleGoal', 'cycleStartDate', 'cycleEndDate');
         $this->statusMessage = 'Sprint planned.';
         $this->statusType = 'success';
-        unset($this->cycles);
+        unset($this->cycles, $this->cycleVelocity);
     }
 
     public function saveCycleGoal(int $cycleId): void
@@ -160,7 +178,7 @@ new #[Layout('layouts.app')] #[Title('Team · TaskFlow')] class extends Componen
 
         $this->statusMessage = 'Sprint goal saved.';
         $this->statusType = 'success';
-        unset($this->cycles);
+        unset($this->cycles, $this->cycleVelocity);
     }
 
     public function startCycle(int $cycleId): void
@@ -194,10 +212,13 @@ new #[Layout('layouts.app')] #[Title('Team · TaskFlow')] class extends Componen
             return;
         }
 
-        $cycle->update(['goal' => $goal, 'status' => 'active', 'started_at' => now()]);
+        DB::transaction(function () use ($cycle, $goal): void {
+            $cycle->update(['goal' => $goal, 'status' => 'active', 'started_at' => now()]);
+            $cycle->recordSnapshot(today(), 'start');
+        });
         $this->statusMessage = $cycle->name.' started.';
         $this->statusType = 'success';
-        unset($this->cycles);
+        unset($this->cycles, $this->cycleVelocity);
     }
 
     public function completeCycle(int $cycleId): void
@@ -211,7 +232,7 @@ new #[Layout('layouts.app')] #[Title('Team · TaskFlow')] class extends Componen
         $allowedTargets = ['backlog', ...$team->cycles()
             ->where('status', 'planned')
             ->whereDate('end_date', '>=', today())
-            ->whereKeyNot($cycle->id)
+            ->where('id', '!=', $cycle->id)
             ->pluck('id')
             ->map(fn ($id) => (string) $id)
             ->all()];
@@ -224,6 +245,8 @@ new #[Layout('layouts.app')] #[Title('Team · TaskFlow')] class extends Componen
 
         $openTaskCount = 0;
         DB::transaction(function () use ($cycle, $target, &$openTaskCount): void {
+            $cycle->recordSnapshot(today(), 'completion');
+
             $openTasks = $cycle->tasks()
                 ->whereHas('status', fn ($query) => $query->where('is_complete', false))
                 ->get();
@@ -240,7 +263,7 @@ new #[Layout('layouts.app')] #[Title('Team · TaskFlow')] class extends Componen
             ? $cycle->name.' completed.'
             : $cycle->name.' completed. '.$openTaskCount.' open '.\Illuminate\Support\Str::plural('task', $openTaskCount).' moved to '.($target === 'backlog' ? 'the backlog' : 'the selected sprint').'.';
         $this->statusType = 'success';
-        unset($this->cycles, $this->teamOverview, $this->membersWithWorkload);
+        unset($this->cycles, $this->cycleVelocity, $this->teamOverview, $this->membersWithWorkload);
     }
 
     public function saveTeam(): void
@@ -400,6 +423,11 @@ new #[Layout('layouts.app')] #[Title('Team · TaskFlow')] class extends Componen
             <section class="mt-6 rounded-xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-slate-900" aria-labelledby="team-cycles-heading">
                 <div class="flex items-start justify-between gap-4">
                     <div><h2 id="team-cycles-heading" class="text-lg font-semibold text-slate-900 dark:text-white">Team sprints</h2><p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Set a sprint goal, plan team work, and review delivery.</p></div>
+                    <div class="shrink-0 rounded-lg bg-indigo-50 px-3 py-2 text-right text-sm dark:bg-indigo-500/10">
+                        <span class="font-semibold text-indigo-700 dark:text-indigo-300">{{ $this->cycleVelocity['average'] }}</span>
+                        <span class="text-indigo-700 dark:text-indigo-300"> avg delivered points</span>
+                        <span class="block text-xs text-indigo-600 dark:text-indigo-400">{{ $this->cycleVelocity['count'] }} completed sprints</span>
+                    </div>
                 </div>
 
                 @can('update', $this->team)
@@ -424,6 +452,33 @@ new #[Layout('layouts.app')] #[Title('Team · TaskFlow')] class extends Componen
                                         @if ($cycle->goal)<p class="mt-2 text-sm text-slate-700 dark:text-slate-300"><span class="font-medium">Goal:</span> {{ $cycle->goal }}</p>@elseif ($cycle->status === 'planned')<p class="mt-2 text-xs text-amber-700 dark:text-amber-300">Set a sprint goal before starting.</p>@endif
                                         <div class="mt-3 h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800" role="progressbar" aria-label="{{ $cycle->name }} task completion" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ $completion }}"><div class="h-full rounded-full bg-emerald-500 transition-all" style="width: {{ $completion }}%"></div></div>
                                         <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">{{ $completion }}% complete · {{ $cycle->tasks_sum_story_points ?? 0 }} planned points · {{ $cycle->completed_story_points ?? 0 }} completed points</p>
+                                        @if ($cycle->status === 'completed' && $cycle->snapshots->isNotEmpty())
+                                            @php($finalSnapshot = $cycle->snapshots->last())
+                                            <details class="mt-4 rounded-lg border border-slate-200 dark:border-slate-700">
+                                                <summary class="cursor-pointer px-3 py-2 text-sm font-semibold text-slate-700 dark:text-slate-200">Sprint report · {{ $finalSnapshot->completed_story_points }} points delivered</summary>
+                                                <div class="overflow-x-auto border-t border-slate-200 dark:border-slate-700">
+                                                    <table class="w-full min-w-[38rem] text-left text-xs">
+                                                        <thead class="bg-slate-50 text-slate-500 dark:bg-slate-950 dark:text-slate-400"><tr><th class="px-3 py-2 font-medium">Date</th><th class="px-3 py-2 font-medium">Scope (points)</th><th class="px-3 py-2 font-medium">Completed (points)</th><th class="px-3 py-2 font-medium">Remaining</th><th class="px-3 py-2 font-medium">Tasks complete</th></tr></thead>
+                                                        <tbody class="divide-y divide-slate-100 dark:divide-slate-800">
+                                                            @php($previousSnapshot = null)
+                                                            @foreach ($cycle->snapshots as $snapshot)
+                                                                @php($scopeChange = $previousSnapshot ? $snapshot->total_story_points - $previousSnapshot->total_story_points : null)
+                                                                <tr>
+                                                                    <td class="whitespace-nowrap px-3 py-2 text-slate-700 dark:text-slate-300">{{ $snapshot->snapshot_date->format('M j') }} <span class="text-slate-500">{{ $snapshot->snapshot_type === 'start' ? '· start' : ($snapshot->snapshot_type === 'completion' ? '· final' : '') }}</span></td>
+                                                                    <td class="px-3 py-2 text-slate-700 dark:text-slate-300">{{ $snapshot->total_story_points }} @if ($scopeChange !== null && $scopeChange !== 0)<span class="{{ $scopeChange > 0 ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400' }}">({{ $scopeChange > 0 ? '+' : '' }}{{ $scopeChange }})</span>@endif</td>
+                                                                    <td class="px-3 py-2 text-slate-700 dark:text-slate-300">{{ $snapshot->completed_story_points }}</td>
+                                                                    <td class="px-3 py-2 text-slate-700 dark:text-slate-300">{{ max(0, $snapshot->total_story_points - $snapshot->completed_story_points) }}</td>
+                                                                    <td class="px-3 py-2 text-slate-700 dark:text-slate-300">{{ $snapshot->completed_tasks }} / {{ $snapshot->total_tasks }}</td>
+                                                                </tr>
+                                                                @php($previousSnapshot = $snapshot)
+                                                            @endforeach
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                            </details>
+                                        @elseif ($cycle->status === 'completed')
+                                            <p class="mt-3 text-xs text-slate-500 dark:text-slate-400">Historical reporting starts when a sprint is tracked; no daily snapshots are available for this sprint.</p>
+                                        @endif
                                     </div>
                                     @can('update', $this->team)
                                         <div class="flex flex-wrap items-center gap-2 sm:justify-end">
@@ -445,6 +500,23 @@ new #[Layout('layouts.app')] #[Title('Team · TaskFlow')] class extends Componen
                     </ul>
                 @else
                     <p class="mt-5 rounded-lg border border-dashed border-slate-300 px-4 py-6 text-center text-sm text-slate-500 dark:border-slate-700 dark:text-slate-400">No cycles yet. Create one to start planning work in time-boxed iterations.</p>
+                @endif
+
+                @if ($this->cycleVelocity['count'] > 0)
+                    <div class="mt-5 border-t border-slate-200 pt-4 dark:border-slate-800">
+                        <h3 class="text-sm font-semibold text-slate-900 dark:text-white">Historical velocity</h3>
+                        <ul class="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                            @foreach ($this->cycles->where('status', 'completed')->sortByDesc('completed_at')->take(6) as $completedCycle)
+                                @php($completionSnapshot = $completedCycle->snapshots->firstWhere('snapshot_type', 'completion'))
+                                @if ($completionSnapshot)
+                                    <li wire:key="team-velocity-{{ $completedCycle->id }}" class="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2 text-sm dark:bg-slate-950">
+                                        <span class="truncate text-slate-700 dark:text-slate-300">{{ $completedCycle->name }}</span>
+                                        <span class="shrink-0 font-semibold tabular-nums text-slate-900 dark:text-white">{{ $completionSnapshot->completed_story_points }} pts</span>
+                                    </li>
+                                @endif
+                            @endforeach
+                        </ul>
+                    </div>
                 @endif
             </section>
 

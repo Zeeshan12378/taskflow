@@ -5,6 +5,7 @@ use App\Models\Cycle;
 use App\Models\Task;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Support\Facades\DB;
 use Livewire\Attributes\Computed;
 use Livewire\Attributes\Layout;
@@ -70,13 +71,18 @@ new #[Layout('layouts.app')] #[Title('Project board · TaskFlow')] class extends
     #[Computed]
     public function tasksByStatus()
     {
-        $relationships = ['status', 'assignee:id,name', 'reviewer:id,name'];
+        $query = $this->project->tasks()->with([
+            'status',
+            'assignee:id,name',
+            'reviewer:id,name',
+            'cycle' => fn (BelongsTo $cycle) => $cycle->where(function (Builder $query): void {
+                $query->where('project_id', $this->projectId);
 
-        if ($this->project->team?->members->contains('id', auth()->id())) {
-            $relationships[] = 'cycle:id,name';
-        }
-
-        $query = $this->project->tasks()->with($relationships);
+                if ($this->canAssignTeamCycles && $this->project->team_id !== null) {
+                    $query->orWhere('team_id', $this->project->team_id);
+                }
+            }),
+        ]);
 
         if (trim($this->search) !== '') {
             $term = '%'.trim($this->search).'%';
@@ -165,17 +171,28 @@ new #[Layout('layouts.app')] #[Title('Project board · TaskFlow')] class extends
     #[Computed]
     public function canFilterCycles(): bool
     {
-        return $this->project->team?->members->contains('id', auth()->id()) ?? false;
+        return true;
     }
 
     #[Computed]
     public function availableCycles()
     {
-        if (! $this->canFilterCycles) {
-            return collect();
-        }
+        return Cycle::query()
+            ->where(function ($query): void {
+                $query->where('project_id', $this->projectId);
 
-        return Cycle::query()->where('team_id', $this->project->team_id)->orderByDesc('start_date')->get(['id', 'name', 'start_date', 'end_date']);
+                if ($this->canAssignTeamCycles && $this->project->team_id !== null) {
+                    $query->orWhere('team_id', $this->project->team_id);
+                }
+            })
+            ->orderByDesc('start_date')
+            ->get(['id', 'project_id', 'team_id', 'name', 'start_date', 'end_date']);
+    }
+
+    #[Computed]
+    public function canAssignTeamCycles(): bool
+    {
+        return $this->project->team?->members->contains('id', auth()->id()) ?? false;
     }
 
     #[Computed]
@@ -346,7 +363,7 @@ new #[Layout('layouts.app')] #[Title('Project board · TaskFlow')] class extends
                 <div><label for="board-reviewer" class="block text-xs font-medium text-slate-600 dark:text-slate-400">Reviewer</label><select id="board-reviewer" wire:model.live="reviewerFilter" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-800 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200"><option value="all">Anyone</option><option value="unassigned">No reviewer</option>@foreach ($this->project->accessibleMembers() as $member)<option value="{{ $member->id }}">{{ $member->name }}</option>@endforeach</select></div>
                 <div><label for="board-reporter" class="block text-xs font-medium text-slate-600 dark:text-slate-400">Reporter</label><select id="board-reporter" wire:model.live="reporterFilter" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-800 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200"><option value="all">Anyone</option>@foreach ($this->reporters as $reporter)<option value="{{ $reporter->id }}">{{ $reporter->name }}</option>@endforeach</select></div>
                 @if ($this->canFilterCycles)
-                    <div><label for="board-cycle" class="block text-xs font-medium text-slate-600 dark:text-slate-400">Team sprint</label><select id="board-cycle" wire:model.live="cycleFilter" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-800 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200"><option value="all">Any sprint</option><option value="none">No sprint</option>@foreach ($this->availableCycles as $cycle)<option value="{{ $cycle->id }}">{{ $cycle->name }}</option>@endforeach</select></div>
+                    <div><label for="board-cycle" class="block text-xs font-medium text-slate-600 dark:text-slate-400">Sprint</label><select id="board-cycle" wire:model.live="cycleFilter" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-800 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200"><option value="all">Any sprint</option><option value="none">No sprint</option>@foreach ($this->availableCycles as $cycle)<option value="{{ $cycle->id }}">{{ $cycle->project_id ? 'Project' : 'Team' }} · {{ $cycle->name }}</option>@endforeach</select></div>
                 @endif
                 <div><label for="board-due-from" class="block text-xs font-medium text-slate-600 dark:text-slate-400">Due from</label><input id="board-due-from" type="date" wire:model.live="dueFrom" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-800 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200"></div>
                 <div><label for="board-due-to" class="block text-xs font-medium text-slate-600 dark:text-slate-400">Due to</label><input id="board-due-to" type="date" wire:model.live="dueTo" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-800 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200"></div>
@@ -411,8 +428,8 @@ new #[Layout('layouts.app')] #[Title('Project board · TaskFlow')] class extends
                             @if ($task->reviewer)
                                 <p class="mt-2 text-xs text-slate-500 dark:text-slate-400">Reviewer: {{ $task->reviewer->name }}</p>
                             @endif
-                            @if ($task->cycle && $this->project->team?->members->contains('id', auth()->id()))
-                                <p class="mt-1 text-xs text-indigo-600 dark:text-indigo-300">Cycle: {{ $task->cycle->name }}</p>
+                            @if ($task->cycle)
+                                <p class="mt-1 text-xs text-indigo-600 dark:text-indigo-300">Sprint: {{ $task->cycle->name }}</p>
                             @endif
                             @if ($task->isBlocked() && $task->blocked_reason)
                                 <p class="rich-text-output mt-2 text-xs text-red-700 dark:text-red-300">Blocked: {!! \App\Support\RichText::sanitize($task->blocked_reason) !!}</p>
