@@ -12,7 +12,7 @@ For an AI-oriented architecture and continuation guide, read [docs/AI_HANDOFF.md
 - Projects with overview, board, list, sprint-grouped task list, calendar, reports, and settings views. Reports include task distributions, recent activity and completion trends. Projects have configurable workflow columns and a completion column.
 - Task types (`task`, `bug`, `feature`), priorities (`low`, `medium`, `high`, `urgent`), due dates, blocked reasons, assignees, reviewers, and story point estimates on the Fibonacci scale (1–21).
 - Optional HTTPS GitHub references on tasks, restricted to `github.com` URLs and recorded in task activity.
-- Board search and filters for workflow status, type, priority, due dates, date ranges, assignee, reviewer, reporter, sprint, and blocked tasks. Drag cards to reorder within or move between columns; manual sorting is disabled while filters are active.
+- Board search and filters for workflow status, type, priority, due dates, date ranges, assignee, reviewer, reporter, sprint, and blocked tasks. Drag cards to reorder within or move between columns; on touch devices, long-press anywhere on a card to drag. Manual sorting is disabled while filters are active.
 - Jira-style quick task creation at the bottom of each board column; review and blocked columns use the full form when reviewer or blocked-reason details are required.
 - Task detail modal with inline field editing, comments, activity history, and in-app notifications for task events.
 - Tasks support optional checklists with up to 30 items, completion tracking, and checklist progress in task activity. Saved project templates and weekly recurring tasks preserve checklist steps while starting each new task with all steps incomplete.

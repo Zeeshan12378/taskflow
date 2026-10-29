@@ -53,6 +53,170 @@ class TasksTest extends TestCase
         ]);
     }
 
+    public function test_project_owner_can_create_and_assign_project_labels_and_remove_them_later(): void
+    {
+        $user = User::factory()->create();
+        $project = $this->createProject($user);
+        $status = $project->statuses()->where('name', 'To Do')->firstOrFail();
+
+        $component = Livewire::actingAs($user)
+            ->test('tasks.form', ['project' => $project->id])
+            ->set('labelName', '  Needs review  ')
+            ->set('labelColor', 'violet')
+            ->call('createProjectLabel')
+            ->assertHasNoErrors()
+            ->assertSee('Project label created.')
+            ->set('title', 'Review the release')
+            ->set('statusId', (string) $status->id)
+            ->call('save')
+            ->assertHasNoErrors();
+
+        $label = $project->labels()->where('name', 'Needs review')->firstOrFail();
+        $task = $project->tasks()->where('title', 'Review the release')->firstOrFail();
+
+        $this->assertSame('violet', $label->color);
+        $this->assertDatabaseHas('project_label_task', [
+            'project_label_id' => $label->id,
+            'task_id' => $task->id,
+        ]);
+        $this->assertSame(
+            ['from' => null, 'to' => 'Needs review'],
+            $task->activities()->where('action', 'updated')->latest()->firstOrFail()->details['labels'],
+        );
+
+        Livewire::actingAs($user)
+            ->test('tasks.form', ['project' => $project->id, 'task' => $task->id])
+            ->set('selectedLabelIds', [])
+            ->call('save')
+            ->assertHasNoErrors();
+
+        $this->assertDatabaseMissing('project_label_task', [
+            'project_label_id' => $label->id,
+            'task_id' => $task->id,
+        ]);
+        $this->assertSame('cleared labels', $task->activities()->where('action', 'updated')->latest()->firstOrFail()->summary());
+
+        Livewire::actingAs($user)
+            ->test('tasks.form', ['project' => $project->id])
+            ->call('deleteProjectLabel', $label->id)
+            ->assertHasNoErrors()
+            ->assertSee('Project label deleted.');
+
+        $this->assertDatabaseMissing('project_labels', ['id' => $label->id]);
+    }
+
+    public function test_task_form_rejects_labels_from_another_project_and_duplicate_label_names(): void
+    {
+        $user = User::factory()->create();
+        $project = $this->createProject($user);
+        $otherProject = $this->createProject($user, 'Other project');
+        $foreignLabel = $otherProject->labels()->create(['name' => 'Foreign', 'color' => 'red']);
+
+        Livewire::actingAs($user)
+            ->test('tasks.form', ['project' => $project->id])
+            ->set('labelName', 'Local')
+            ->call('createProjectLabel')
+            ->assertHasNoErrors();
+
+        Livewire::actingAs($user)
+            ->test('tasks.form', ['project' => $project->id])
+            ->set('title', 'Must not save')
+            ->set('selectedLabelIds', [$foreignLabel->id])
+            ->call('save')
+            ->assertHasErrors(['selectedLabelIds.0']);
+
+        Livewire::actingAs($user)
+            ->test('tasks.form', ['project' => $project->id])
+            ->set('labelName', 'Local')
+            ->call('createProjectLabel')
+            ->assertHasErrors(['labelName']);
+
+        Livewire::actingAs($user)
+            ->test('tasks.form', ['project' => $project->id])
+            ->set('labelName', 'Invalid color')
+            ->set('labelColor', 'not-a-color')
+            ->call('createProjectLabel')
+            ->assertHasErrors(['labelColor']);
+
+        $this->assertDatabaseMissing('tasks', ['title' => 'Must not save']);
+        $this->assertSame(1, $project->labels()->where('name', 'Local')->count());
+    }
+
+    public function test_project_members_can_add_and_apply_labels_but_cannot_delete_them(): void
+    {
+        $owner = User::factory()->create();
+        $member = User::factory()->create();
+        $project = $this->createProject($owner);
+        $project->members()->attach($member->id, ['role' => 'member']);
+        $label = $project->labels()->create(['name' => 'Backend', 'color' => 'blue']);
+        $task = $this->createTask($owner, $project, ['title' => 'Update service']);
+
+        Livewire::actingAs($member)
+            ->test('tasks.form', ['project' => $project->id])
+            ->set('labelName', 'New label')
+            ->assertSee('Add label')
+            ->call('createProjectLabel')
+            ->assertHasNoErrors()
+            ->assertSee('Project label created.');
+
+        $newLabel = $project->labels()->where('name', 'New label')->firstOrFail();
+
+        Livewire::actingAs($member)
+            ->test('tasks.form', ['project' => $project->id])
+            ->call('deleteProjectLabel', $label->id)
+            ->assertForbidden();
+
+        Livewire::actingAs($member)
+            ->test('tasks.form', ['project' => $project->id, 'task' => $task->id])
+            ->set('selectedLabelIds', [$label->id, $newLabel->id])
+            ->call('save')
+            ->assertHasNoErrors();
+
+        $this->assertDatabaseHas('project_label_task', [
+            'project_label_id' => $label->id,
+            'task_id' => $task->id,
+        ]);
+        $this->assertDatabaseHas('project_label_task', [
+            'project_label_id' => $newLabel->id,
+            'task_id' => $task->id,
+        ]);
+    }
+
+    public function test_labels_render_on_task_views_and_filter_board_and_global_tasks(): void
+    {
+        $user = User::factory()->create();
+        $project = $this->createProject($user);
+        $label = $project->labels()->create(['name' => 'Customer visible', 'color' => 'emerald']);
+        $labeledTask = $this->createTask($user, $project, ['title' => 'Labeled task']);
+        $unlabeledTask = $this->createTask($user, $project, ['title' => 'Unlabeled task']);
+        $labeledTask->labels()->attach($label);
+
+        Livewire::actingAs($user)
+            ->test('projects.board', ['project' => $project->id])
+            ->set('labelFilter', (string) $label->id)
+            ->assertSee('Labeled task')
+            ->assertSee('Customer visible')
+            ->assertDontSee('Unlabeled task')
+            ->call('sortTask', $unlabeledTask->id, 0, $project->statuses()->where('name', 'To Do')->value('id'))
+            ->assertSee('Clear board filters before reordering tasks.');
+
+        Livewire::actingAs($user)
+            ->test('projects.list', ['project' => $project->id])
+            ->assertSee('Customer visible');
+
+        Livewire::actingAs($user)
+            ->test('projects.sprints', ['project' => $project->id])
+            ->assertSee('Customer visible');
+
+        Livewire::actingAs($user)
+            ->test('tasks.index')
+            ->set('projectFilter', (string) $project->id)
+            ->set('labelFilter', (string) $label->id)
+            ->assertSee('Labeled task')
+            ->assertSee('Customer visible')
+            ->assertDontSee('Unlabeled task');
+    }
+
     public function test_task_checklist_items_are_saved_and_completion_changes_are_recorded(): void
     {
         $user = User::factory()->create();
@@ -779,6 +943,8 @@ class TasksTest extends TestCase
 
         Livewire::actingAs($user)
             ->test('projects.board', ['project' => $project->id])
+            ->assertSee('delayOnTouchOnly: true', false)
+            ->assertDontSee('wire:sort:handle', false)
             ->call('sortTask', $thirdTask->id, 0, $status->id)
             ->assertSee('Task order updated.');
 

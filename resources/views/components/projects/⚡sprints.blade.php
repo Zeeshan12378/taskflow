@@ -57,7 +57,7 @@ new #[Layout('layouts.app')] #[Title('Project sprints · TaskFlow')] class exten
     public function tasks(): Collection
     {
         return $this->project->tasks()
-            ->with(['status', 'assignee:id,name'])
+            ->with(['status', 'assignee:id,name', 'labels'])
             ->orderByRaw('due_date is null')
             ->orderBy('due_date')
             ->latest('updated_at')
@@ -145,6 +145,13 @@ new #[Layout('layouts.app')] #[Title('Project sprints · TaskFlow')] class exten
                                     <td class="px-5 py-4">
                                         <a href="{{ route('projects.tasks.edit', [$this->project, $task]) }}" wire:navigate class="font-medium text-slate-900 hover:text-indigo-700 dark:text-white dark:hover:text-indigo-300">{{ $task->title }}</a>
                                         <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">{{ ucfirst($task->type) }} · #{{ $task->id }}@if ($task->story_points) · {{ $task->story_points }} pts @endif</p>
+                                        @if ($task->labels->isNotEmpty())
+                                            <div class="mt-2 flex flex-wrap gap-1">
+                                                @foreach ($task->labels as $label)
+                                                    <x-tasks.label :label="$label" wire:key="sprint-task-{{ $task->id }}-label-{{ $label->id }}" />
+                                                @endforeach
+                                            </div>
+                                        @endif
                                     </td>
                                     <td class="px-5 py-4 text-sm text-slate-700 dark:text-slate-300">{{ $task->status?->name ?? 'No status' }}</td>
                                     <td class="px-5 py-4 text-sm capitalize text-slate-700 dark:text-slate-300">{{ $task->priority }}</td>

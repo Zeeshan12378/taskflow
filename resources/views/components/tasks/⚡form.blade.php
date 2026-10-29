@@ -1,6 +1,7 @@
 <?php
 
 use App\Models\Project;
+use App\Models\ProjectLabel;
 use App\Models\Cycle;
 use App\Models\Task;
 use App\Models\TaskTemplate;
@@ -48,6 +49,15 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
     /** @var array<int, array{text: string, completed: bool}> */
     public array $checklistItems = [];
 
+    /** @var array<int, int|string> */
+    public array $selectedLabelIds = [];
+
+    public string $labelName = '';
+
+    public string $labelColor = 'slate';
+
+    public string $labelMessage = '';
+
     public string $selectedTaskTemplate = '';
 
     public string $templateName = '';
@@ -81,7 +91,7 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
             return null;
         }
 
-        return $this->project->tasks()->with(['status', 'assignee', 'cycle'])->findOrFail($this->taskId);
+        return $this->project->tasks()->with(['status', 'assignee', 'cycle', 'labels'])->findOrFail($this->taskId);
     }
 
     #[Computed]
@@ -151,6 +161,12 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
     public function taskTemplates()
     {
         return $this->project->taskTemplates()->get();
+    }
+
+    #[Computed]
+    public function projectLabels()
+    {
+        return $this->project->labels()->get();
     }
 
     #[Computed]
@@ -234,6 +250,7 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
         $this->cycleId = (string) ($taskRecord->cycle_id ?? '');
         $this->storyPoints = (string) ($taskRecord->story_points ?? '');
         $this->checklistItems = $taskRecord->checklist ?? [];
+        $this->selectedLabelIds = $taskRecord->labels->modelKeys();
     }
 
     public function editInlineField(string $field): void
@@ -410,6 +427,48 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
         $project->taskTemplates()->findOrFail($templateId)->delete();
         $this->templateMessage = 'Task template deleted.';
         unset($this->taskTemplates);
+    }
+
+    public function createProjectLabel(): void
+    {
+        $project = $this->project;
+        $this->authorize('view', $project);
+        $this->labelName = trim($this->labelName);
+
+        $validated = $this->validate([
+            'labelName' => [
+                'required',
+                'string',
+                'max:40',
+                Rule::unique('project_labels', 'name')->where('project_id', $project->id),
+            ],
+            'labelColor' => ['required', Rule::in(ProjectLabel::COLORS)],
+        ]);
+
+        $label = $project->labels()->create([
+            'name' => $validated['labelName'],
+            'color' => $validated['labelColor'],
+        ]);
+        $this->selectedLabelIds[] = $label->id;
+        $this->labelName = '';
+        $this->labelColor = 'slate';
+        $this->labelMessage = 'Project label created.';
+        $this->resetValidation(['labelName', 'labelColor']);
+        unset($this->projectLabels);
+    }
+
+    public function deleteProjectLabel(int $labelId): void
+    {
+        $project = $this->project;
+        $this->authorize('update', $project);
+        $label = $project->labels()->findOrFail($labelId);
+        $label->delete();
+        $this->selectedLabelIds = array_values(array_filter(
+            $this->selectedLabelIds,
+            fn (mixed $selectedLabelId): bool => (int) $selectedLabelId !== $label->id,
+        ));
+        $this->labelMessage = 'Project label deleted.';
+        unset($this->projectLabels, $this->task);
     }
 
     public function saveRecurringTaskSchedule(): void
@@ -625,6 +684,13 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
             'githubUrl' => $this->githubUrlRules(),
             'assigneeId' => ['nullable', 'integer', Rule::in($project->accessibleMemberIds())],
             'reviewerId' => [$isEnteringReview ? 'required' : 'nullable', 'integer', Rule::in($project->accessibleMemberIds())],
+            'selectedLabelIds' => ['nullable', 'array', 'max:20'],
+            'selectedLabelIds.*' => [
+                'required',
+                'integer',
+                'distinct',
+                Rule::exists('project_labels', 'id')->where('project_id', $project->id),
+            ],
         ];
 
         $rules['cycleId'] = ['nullable', 'integer', ...$this->cycleAssignmentRules($project, $currentCycleId)];
@@ -669,11 +735,17 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
         if ($this->taskId !== null) {
             $task = $project->tasks()->findOrFail($this->taskId);
             $this->authorize('update', $task);
-            DB::transaction(fn () => $task->update($attributes));
+            DB::transaction(function () use ($task, $attributes, $validated): void {
+                $task->update($attributes);
+                $this->syncTaskLabels($task, array_map('intval', $validated['selectedLabelIds'] ?? []));
+            });
             session()->flash('status', 'Task updated.');
         } else {
             $this->authorize('create', [Task::class, $project]);
-            DB::transaction(fn () => $project->tasks()->create($attributes + ['user_id' => auth()->id()]));
+            DB::transaction(function () use ($project, $attributes, $validated): void {
+                $task = $project->tasks()->create($attributes + ['user_id' => auth()->id()]);
+                $this->syncTaskLabels($task, array_map('intval', $validated['selectedLabelIds'] ?? []));
+            });
             session()->flash('status', 'Task created.');
         }
 
@@ -709,6 +781,32 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
                 }
             },
         ];
+    }
+
+    /**
+     * @param  array<int, int>  $labelIds
+     */
+    private function syncTaskLabels(Task $task, array $labelIds): void
+    {
+        $labelIds = array_values(array_unique($labelIds));
+        $previousLabels = $task->labels()->orderBy('name')->pluck('name')->all();
+        $nextLabels = $this->project->labels()
+            ->whereIn('id', $labelIds)
+            ->orderBy('name')
+            ->pluck('name')
+            ->all();
+
+        if ($previousLabels === $nextLabels) {
+            return;
+        }
+
+        $task->labels()->sync($labelIds);
+        $task->recordActivity('updated', [
+            'labels' => [
+                'from' => $previousLabels === [] ? null : implode(', ', $previousLabels),
+                'to' => $nextLabels === [] ? null : implode(', ', $nextLabels),
+            ],
+        ]);
     }
 
     /**
@@ -896,6 +994,44 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
             </section>
         @endif
 
+        <section class="space-y-3 rounded-lg border border-slate-200 p-4 dark:border-slate-700" aria-label="Manage project labels">
+            <div>
+                <h2 class="text-sm font-medium text-slate-900 dark:text-slate-200">Project labels</h2>
+                <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Add labels for everyone on this project to use.</p>
+            </div>
+            <div class="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(8rem,0.5fr)_auto]">
+                <div>
+                    <label for="labelName" class="sr-only">New label name</label>
+                    <input id="labelName" type="text" wire:model="labelName" maxlength="40" placeholder="Label name" @error('labelName') aria-invalid="true" @enderror class="min-h-10 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none focus:border-indigo-600 focus:ring-4 focus:ring-indigo-600/10 dark:border-slate-700 dark:bg-slate-950 dark:text-white">
+                    @error('labelName') <p class="mt-1 text-xs text-red-600 dark:text-red-400">{{ $message }}</p> @enderror
+                </div>
+                <div>
+                    <label for="labelColor" class="sr-only">Label color</label>
+                    <select id="labelColor" wire:model="labelColor" @error('labelColor') aria-invalid="true" @enderror class="min-h-10 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-950 dark:text-white">
+                        @foreach (\App\Models\ProjectLabel::COLORS as $color)
+                            <option value="{{ $color }}">{{ ucfirst($color) }}</option>
+                        @endforeach
+                    </select>
+                </div>
+                <button type="button" wire:click="createProjectLabel" class="inline-flex min-h-10 items-center justify-center rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600">Add label</button>
+            </div>
+            @if ($this->projectLabels->isNotEmpty())
+                <ul class="flex flex-wrap gap-2" aria-label="Project labels">
+                    @foreach ($this->projectLabels as $label)
+                        <li wire:key="project-label-management-{{ $label->id }}" class="inline-flex items-center gap-1 rounded-full bg-slate-100 py-1 pl-2.5 pr-1 dark:bg-slate-800">
+                            <x-tasks.label :label="$label" />
+                            @can('update', $this->project)
+                                <button type="button" wire:click="deleteProjectLabel({{ $label->id }})" wire:confirm="Delete the {{ $label->name }} label from every task in this project?" aria-label="Delete {{ $label->name }} project label" class="inline-flex h-6 w-6 items-center justify-center rounded-full text-slate-500 hover:bg-white hover:text-red-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600 dark:text-slate-400 dark:hover:bg-slate-700">×</button>
+                            @endcan
+                        </li>
+                    @endforeach
+                </ul>
+            @endif
+            @if ($labelMessage !== '')
+                <p role="status" class="text-sm font-medium text-emerald-700 dark:text-emerald-400">{{ $labelMessage }}</p>
+            @endif
+        </section>
+
         @can('update', $this->project)
             <section class="space-y-3 rounded-lg border border-slate-200 p-4 dark:border-slate-700" aria-label="Manage project task templates">
                 <div>
@@ -971,6 +1107,27 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
         @if ($templateMessage !== '')
             <p role="status" class="text-sm font-medium text-emerald-700 dark:text-emerald-400">{{ $templateMessage }}</p>
         @endif
+
+        <section class="space-y-3 rounded-lg border border-slate-200 p-4 dark:border-slate-700" aria-label="Task labels">
+            <div>
+                <h2 class="text-sm font-medium text-slate-900 dark:text-slate-200">Labels <span class="font-normal text-slate-500">(optional)</span></h2>
+                <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Choose labels that describe or categorize this task.</p>
+            </div>
+            @if ($this->projectLabels->isNotEmpty())
+                <div class="flex flex-wrap gap-2">
+                    @foreach ($this->projectLabels as $label)
+                        <label wire:key="task-label-choice-{{ $label->id }}" class="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800">
+                            <input type="checkbox" wire:model="selectedLabelIds" value="{{ $label->id }}" class="rounded border-slate-300 text-indigo-600 focus:ring-indigo-600 dark:border-slate-600 dark:bg-slate-950">
+                            <x-tasks.label :label="$label" />
+                        </label>
+                    @endforeach
+                </div>
+            @else
+                <p class="text-sm text-slate-500 dark:text-slate-400">No labels have been created for this project yet.</p>
+            @endif
+            @error('selectedLabelIds') <p role="alert" class="text-sm text-red-600 dark:text-red-400">{{ $message }}</p> @enderror
+            @error('selectedLabelIds.*') <p role="alert" class="text-sm text-red-600 dark:text-red-400">Choose only labels created for this project.</p> @enderror
+        </section>
 
         @if (! $modal || ! $taskId)
         <div>

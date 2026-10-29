@@ -48,6 +48,7 @@ class TaskActivity extends Model
             'blocked_reason' => 'blocked reason',
             'github_url' => 'GitHub reference',
             'checklist' => 'checklist',
+            'labels' => 'labels',
         ];
 
         return collect($this->details ?? [])

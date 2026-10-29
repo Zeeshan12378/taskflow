@@ -27,6 +27,8 @@ new #[Layout('layouts.app')] #[Title('Project board · TaskFlow')] class extends
 
     public string $typeFilter = 'all';
 
+    public string $labelFilter = 'all';
+
     public string $assigneeFilter = 'all';
 
     public string $reviewerFilter = 'all';
@@ -79,6 +81,7 @@ new #[Layout('layouts.app')] #[Title('Project board · TaskFlow')] class extends
             'status',
             'assignee:id,name',
             'reviewer:id,name',
+            'labels',
             'cycle' => fn (BelongsTo $cycle) => $cycle->where(function (Builder $query): void {
                 $query->where('project_id', $this->projectId);
 
@@ -114,6 +117,11 @@ new #[Layout('layouts.app')] #[Title('Project board · TaskFlow')] class extends
 
         if (in_array($this->typeFilter, Task::TYPES, true)) {
             $query->where('type', $this->typeFilter);
+        }
+
+        if (ctype_digit($this->labelFilter)) {
+            $labelId = $this->project->labels()->whereKey((int) $this->labelFilter)->value('id');
+            $query->whereHas('labels', fn (Builder $labels): Builder => $labels->whereKey($labelId ?? 0));
         }
 
         $memberIds = $this->project->accessibleMemberIds();
@@ -191,6 +199,12 @@ new #[Layout('layouts.app')] #[Title('Project board · TaskFlow')] class extends
     }
 
     #[Computed]
+    public function projectLabels()
+    {
+        return $this->project->labels()->get();
+    }
+
+    #[Computed]
     public function availableCycles()
     {
         return Cycle::query()
@@ -224,7 +238,7 @@ new #[Layout('layouts.app')] #[Title('Project board · TaskFlow')] class extends
     public function activeFilterCount(): int
     {
         return collect([
-            $this->priorityFilter !== 'all', $this->dueFilter !== 'all', $this->typeFilter !== 'all',
+            $this->priorityFilter !== 'all', $this->dueFilter !== 'all', $this->typeFilter !== 'all', $this->labelFilter !== 'all',
             $this->assigneeFilter !== 'all', $this->reviewerFilter !== 'all', $this->statusFilter !== 'all',
             $this->cycleFilter !== 'all', $this->reporterFilter !== 'all', $this->dueFrom !== '', $this->dueTo !== '', $this->blockedOnly,
         ])->filter()->count();
@@ -232,10 +246,11 @@ new #[Layout('layouts.app')] #[Title('Project board · TaskFlow')] class extends
 
     public function clearFilters(): void
     {
-        $this->reset('search', 'priorityFilter', 'dueFilter', 'typeFilter', 'assigneeFilter', 'reviewerFilter', 'statusFilter', 'cycleFilter', 'reporterFilter', 'dueFrom', 'dueTo', 'blockedOnly');
+        $this->reset('search', 'priorityFilter', 'dueFilter', 'typeFilter', 'labelFilter', 'assigneeFilter', 'reviewerFilter', 'statusFilter', 'cycleFilter', 'reporterFilter', 'dueFrom', 'dueTo', 'blockedOnly');
         $this->priorityFilter = 'all';
         $this->dueFilter = 'all';
         $this->typeFilter = 'all';
+        $this->labelFilter = 'all';
         $this->assigneeFilter = 'all';
         $this->reviewerFilter = 'all';
         $this->statusFilter = 'all';
@@ -537,6 +552,7 @@ new #[Layout('layouts.app')] #[Title('Project board · TaskFlow')] class extends
             <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                 <div><label for="board-status" class="block text-xs font-medium text-slate-600 dark:text-slate-400">Workflow status</label><select id="board-status" wire:model.live="statusFilter" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-800 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200"><option value="all">All statuses</option>@foreach ($this->project->statuses as $status)<option value="{{ $status->id }}">{{ $status->name }}</option>@endforeach</select></div>
                 <div><label for="board-type" class="block text-xs font-medium text-slate-600 dark:text-slate-400">Task type</label><select id="board-type" wire:model.live="typeFilter" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-800 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200"><option value="all">All types</option>@foreach (\App\Models\Task::TYPES as $type)<option value="{{ $type }}">{{ ucfirst($type) }}</option>@endforeach</select></div>
+                <div><label for="board-label" class="block text-xs font-medium text-slate-600 dark:text-slate-400">Label</label><select id="board-label" wire:model.live="labelFilter" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-800 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200"><option value="all">All labels</option>@foreach ($this->projectLabels as $label)<option value="{{ $label->id }}">{{ $label->name }}</option>@endforeach</select></div>
                 <div><label for="board-priority" class="block text-xs font-medium text-slate-600 dark:text-slate-400">Priority</label><select id="board-priority" wire:model.live="priorityFilter" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-800 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200"><option value="all">All priorities</option>@foreach (\App\Models\Task::PRIORITIES as $priority)<option value="{{ $priority }}">{{ ucfirst($priority) }}</option>@endforeach</select></div>
                 <div><label for="board-due" class="block text-xs font-medium text-slate-600 dark:text-slate-400">Due date</label><select id="board-due" wire:model.live="dueFilter" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-800 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200"><option value="all">Any due date</option><option value="overdue">Overdue</option><option value="today">Due today</option><option value="next_7_days">Next 7 days</option><option value="upcoming">After 7 days</option><option value="none">No due date</option></select></div>
                 <div><label for="board-assignee" class="block text-xs font-medium text-slate-600 dark:text-slate-400">Assignee</label><select id="board-assignee" wire:model.live="assigneeFilter" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-800 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200"><option value="all">Anyone</option><option value="unassigned">Unassigned</option>@foreach ($this->project->accessibleMembers() as $member)<option value="{{ $member->id }}">{{ $member->name }}</option>@endforeach</select></div>
@@ -561,12 +577,12 @@ new #[Layout('layouts.app')] #[Title('Project board · TaskFlow')] class extends
         ])>{{ $statusMessage }}</p>
     @endif
 
-    <p wire:loading.flex wire:target="search,priorityFilter,dueFilter,typeFilter,assigneeFilter,reviewerFilter,statusFilter,cycleFilter,reporterFilter,dueFrom,dueTo,blockedOnly" role="status" class="mt-4 items-center gap-2 text-sm text-slate-500 dark:text-slate-400">
+    <p wire:loading.flex wire:target="search,priorityFilter,dueFilter,typeFilter,labelFilter,assigneeFilter,reviewerFilter,statusFilter,cycleFilter,reporterFilter,dueFrom,dueTo,blockedOnly" role="status" class="mt-4 items-center gap-2 text-sm text-slate-500 dark:text-slate-400">
         <span class="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-indigo-600 dark:border-slate-700 dark:border-t-indigo-400" aria-hidden="true"></span>
         Updating board...
     </p>
 
-    <div wire:loading.class="opacity-50" wire:loading.attr="aria-busy" wire:target="search,priorityFilter,dueFilter,typeFilter,assigneeFilter,reviewerFilter,statusFilter,cycleFilter,reporterFilter,dueFrom,dueTo,blockedOnly" class="mt-6 flex snap-x snap-mandatory items-start gap-4 overflow-x-auto overflow-y-hidden pb-5 transition-opacity" aria-label="Task board columns">
+    <div wire:loading.class="opacity-50" wire:loading.attr="aria-busy" wire:target="search,priorityFilter,dueFilter,typeFilter,labelFilter,assigneeFilter,reviewerFilter,statusFilter,cycleFilter,reporterFilter,dueFrom,dueTo,blockedOnly" class="mt-6 flex snap-x snap-mandatory items-start gap-4 overflow-x-auto overflow-y-hidden pb-5 transition-opacity" aria-label="Task board columns">
         @foreach ($this->visibleStatuses as $status)
             @php($columnTasks = $this->tasksByStatus->get($status->id, collect()))
             <section
@@ -592,6 +608,7 @@ new #[Layout('layouts.app')] #[Title('Project board · TaskFlow')] class extends
                         wire:sort="sortTask"
                         wire:sort:group="board-{{ $this->projectId }}"
                         wire:sort:group-id="{{ $status->id }}"
+                        wire:sort:config="{ delay: 350, delayOnTouchOnly: true, touchStartThreshold: 5 }"
                     @endif
                     class="mt-3 min-h-24 flex-1 space-y-3 overflow-y-auto overscroll-y-contain pr-1 [scrollbar-gutter:stable]"
                 >
@@ -608,7 +625,7 @@ new #[Layout('layouts.app')] #[Title('Project board · TaskFlow')] class extends
                         >
                             <div class="flex items-start justify-between gap-2">
                                 @if ($this->canReorderTasks)
-                                    <span wire:sort:handle title="Drag to reorder" aria-label="Drag to reorder {{ $task->title }}" class="mt-0.5 shrink-0 cursor-grab text-slate-400 active:cursor-grabbing dark:text-slate-500">
+                                    <span title="Drag or long-press to reorder" aria-label="Drag or long-press to reorder {{ $task->title }}" class="mt-0.5 shrink-0 cursor-grab text-slate-400 active:cursor-grabbing dark:text-slate-500">
                                         <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="M7 4a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Zm0 6a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Zm0 6a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Zm9-12a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Zm0 6a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Zm0 6a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Z" /></svg>
                                     </span>
                                 @endif
@@ -623,6 +640,13 @@ new #[Layout('layouts.app')] #[Title('Project board · TaskFlow')] class extends
                             </div>
                             <span class="mt-2 inline-flex rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-indigo-700 dark:bg-indigo-500/10 dark:text-indigo-300">{{ $task->type }}</span>
                             @if ($task->story_points)<span class="ml-1 mt-2 inline-flex rounded-full bg-violet-50 px-2 py-0.5 text-[10px] font-semibold text-violet-700 dark:bg-violet-500/10 dark:text-violet-300">{{ $task->story_points }} pts</span>@endif
+                            @if ($task->labels->isNotEmpty())
+                                <div class="mt-2 flex flex-wrap gap-1">
+                                    @foreach ($task->labels as $label)
+                                        <x-tasks.label :label="$label" wire:key="board-task-{{ $task->id }}-label-{{ $label->id }}" />
+                                    @endforeach
+                                </div>
+                            @endif
                             @if ($task->reviewer)
                                 <p class="mt-2 text-xs text-slate-500 dark:text-slate-400">Reviewer: {{ $task->reviewer->name }}</p>
                             @endif

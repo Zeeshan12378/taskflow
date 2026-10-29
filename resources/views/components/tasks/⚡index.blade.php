@@ -1,6 +1,7 @@
 <?php
 
 use App\Models\Project;
+use App\Models\ProjectLabel;
 use App\Models\ProjectStatus;
 use App\Models\Task;
 use App\Models\Cycle;
@@ -31,6 +32,9 @@ new #[Layout('layouts.app')] #[Title('Tasks · TaskFlow')] class extends Compone
 
     #[Url(except: 'all')]
     public string $typeFilter = 'all';
+
+    #[Url(except: 'all')]
+    public string $labelFilter = 'all';
 
     #[Url(except: 'all')]
     public string $dueFilter = 'all';
@@ -74,7 +78,7 @@ new #[Layout('layouts.app')] #[Title('Tasks · TaskFlow')] class extends Compone
 
     public function updated(string $property): void
     {
-        if (in_array($property, ['search', 'statusFilter', 'priorityFilter', 'typeFilter', 'dueFilter', 'projectFilter', 'workScope', 'cycleFilter', 'dueFrom', 'dueTo', 'blockedOnly'], true)) {
+        if (in_array($property, ['search', 'statusFilter', 'priorityFilter', 'typeFilter', 'labelFilter', 'dueFilter', 'projectFilter', 'workScope', 'cycleFilter', 'dueFrom', 'dueTo', 'blockedOnly'], true)) {
             $this->resetPage();
         }
     }
@@ -85,6 +89,7 @@ new #[Layout('layouts.app')] #[Title('Tasks · TaskFlow')] class extends Compone
         $this->statusFilter = 'all';
         $this->priorityFilter = 'all';
         $this->typeFilter = 'all';
+        $this->labelFilter = 'all';
         $this->dueFilter = 'all';
         $this->projectFilter = 'all';
         $this->workScope = 'all';
@@ -109,6 +114,21 @@ new #[Layout('layouts.app')] #[Title('Tasks · TaskFlow')] class extends Compone
             ->with('project:id,name')
             ->orderBy('project_id')
             ->orderBy('position')
+            ->get();
+    }
+
+    #[Computed]
+    public function availableLabels(): Collection
+    {
+        return ProjectLabel::query()
+            ->whereHas('project', fn (Builder $query) => $query->accessibleTo(auth()->user()))
+            ->when(
+                ctype_digit($this->projectFilter),
+                fn (Builder $query) => $query->where('project_id', (int) $this->projectFilter),
+            )
+            ->with('project:id,name')
+            ->orderBy('project_id')
+            ->orderBy('name')
             ->get();
     }
 
@@ -155,7 +175,7 @@ new #[Layout('layouts.app')] #[Title('Tasks · TaskFlow')] class extends Compone
     #[Computed]
     public function tasks(): LengthAwarePaginator
     {
-        $relationships = ['project:id,name', 'status:id,project_id,name,is_complete', 'assignee:id,name,email', 'reviewer:id,name'];
+        $relationships = ['project:id,name', 'status:id,project_id,name,is_complete', 'assignee:id,name,email', 'reviewer:id,name', 'labels'];
         if ($this->onlyAssignedToMe && auth()->user()->teams()->exists()) {
             $relationships[] = 'cycle:id,name';
         }
@@ -177,6 +197,10 @@ new #[Layout('layouts.app')] #[Title('Tasks · TaskFlow')] class extends Compone
             ->when($this->projectFilter !== 'all' && ctype_digit($this->projectFilter), fn (Builder $query) => $query->where('project_id', (int) $this->projectFilter))
             ->when(in_array($this->priorityFilter, Task::PRIORITIES, true), fn (Builder $query) => $query->where('priority', $this->priorityFilter))
             ->when(in_array($this->typeFilter, Task::TYPES, true), fn (Builder $query) => $query->where('type', $this->typeFilter))
+            ->when(ctype_digit($this->labelFilter), function (Builder $query): void {
+                $labelId = $this->availableLabels->firstWhere('id', (int) $this->labelFilter)?->id;
+                $query->whereHas('labels', fn (Builder $labels) => $labels->whereKey($labelId ?? 0));
+            })
             ->when($this->statusFilter !== 'all' && ctype_digit($this->statusFilter), fn (Builder $query) => $query->whereHas('status', fn (Builder $query) => $query->whereKey((int) $this->statusFilter)->whereHas('project', fn (Builder $query) => $query->accessibleTo(auth()->user()))))
             ->when($this->dueFilter === 'overdue', fn (Builder $query) => $query->whereDate('due_date', '<', today())->whereHas('status', fn (Builder $query) => $query->where('is_complete', false)))
             ->when($this->dueFilter === 'today', fn (Builder $query) => $query->whereDate('due_date', today())->whereHas('status', fn (Builder $query) => $query->where('is_complete', false)))
@@ -352,6 +376,15 @@ new #[Layout('layouts.app')] #[Title('Tasks · TaskFlow')] class extends Compone
             </select>
         </label>
         <label>
+            <span class="sr-only">Filter by label</span>
+            <select wire:model.live="labelFilter" class="min-h-10 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-700 shadow-sm focus:border-indigo-600 focus:ring-4 focus:ring-indigo-600/10 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200">
+                <option value="all">All labels</option>
+                @foreach ($this->availableLabels as $label)
+                    <option value="{{ $label->id }}">{{ $label->project->name }} · {{ $label->name }}</option>
+                @endforeach
+            </select>
+        </label>
+        <label>
             <span class="sr-only">Filter by due date</span>
             <select wire:model.live="dueFilter" class="min-h-10 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-700 shadow-sm focus:border-indigo-600 focus:ring-4 focus:ring-indigo-600/10 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200">
                 <option value="all">Any due date</option>
@@ -390,12 +423,12 @@ new #[Layout('layouts.app')] #[Title('Tasks · TaskFlow')] class extends Compone
     </div>
     </section>
 
-    <p wire:loading.flex wire:target="search,statusFilter,priorityFilter,typeFilter,dueFilter,projectFilter,workScope,cycleFilter,dueFrom,dueTo,blockedOnly" role="status" class="mt-4 items-center gap-2 text-sm text-slate-500 dark:text-slate-400">
+    <p wire:loading.flex wire:target="search,statusFilter,priorityFilter,typeFilter,labelFilter,dueFilter,projectFilter,workScope,cycleFilter,dueFrom,dueTo,blockedOnly" role="status" class="mt-4 items-center gap-2 text-sm text-slate-500 dark:text-slate-400">
         <span class="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-indigo-600 dark:border-slate-700 dark:border-t-indigo-400" aria-hidden="true"></span>
         Updating tasks...
     </p>
 
-    <div wire:loading.class="opacity-50" wire:loading.attr="aria-busy" wire:target="search,statusFilter,priorityFilter,typeFilter,dueFilter,projectFilter,workScope,cycleFilter,dueFrom,dueTo,blockedOnly" class="transition-opacity">
+    <div wire:loading.class="opacity-50" wire:loading.attr="aria-busy" wire:target="search,statusFilter,priorityFilter,typeFilter,labelFilter,dueFilter,projectFilter,workScope,cycleFilter,dueFrom,dueTo,blockedOnly" class="transition-opacity">
     @if ($this->tasks->isNotEmpty())
         <div class="mt-5 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
             <ul class="divide-y divide-slate-100 dark:divide-slate-800" aria-label="{{ $onlyAssignedToMe ? 'My tasks' : 'Tasks' }}">
@@ -413,6 +446,13 @@ new #[Layout('layouts.app')] #[Title('Tasks · TaskFlow')] class extends Compone
                                 @if ($task->reviewer_id === auth()->id())<span class="rounded bg-violet-50 px-1.5 py-0.5 font-medium text-violet-700 dark:bg-violet-500/10 dark:text-violet-300">Reviewing</span>@endif
                                 @if ($task->cycle && $this->availableCycles->contains('id', $task->cycle_id))<span>{{ $task->cycle->name }}</span>@endif
                             </div>
+                            @if ($task->labels->isNotEmpty())
+                                <div class="mt-2 flex flex-wrap gap-1">
+                                    @foreach ($task->labels as $label)
+                                        <x-tasks.label :label="$label" wire:key="task-{{ $task->id }}-label-{{ $label->id }}" />
+                                    @endforeach
+                                </div>
+                            @endif
                         </div>
                         <div class="flex flex-wrap items-center gap-2 sm:justify-end">
                             <span @class([
