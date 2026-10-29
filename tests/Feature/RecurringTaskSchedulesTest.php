@@ -30,6 +30,7 @@ class RecurringTaskSchedulesTest extends TestCase
             ->assertHasNoErrors()
             ->assertSee('Weekly task schedule created.');
 
+        $schedule = $project->recurringTaskSchedules()->firstOrFail();
         $this->assertDatabaseHas('recurring_task_schedules', [
             'project_id' => $project->id,
             'created_by' => $user->id,
@@ -39,6 +40,9 @@ class RecurringTaskSchedulesTest extends TestCase
             'next_run_on' => '2026-11-02 00:00:00',
             'is_active' => 1,
         ]);
+        $this->assertSame([
+            ['text' => 'Review the release notes', 'completed' => false],
+        ], $schedule->checklist);
         $this->assertSame(0, $project->tasks()->count());
     }
 
@@ -50,6 +54,7 @@ class RecurringTaskSchedulesTest extends TestCase
         $schedule = $this->createSchedule($project, $user, [
             'weekday' => 1,
             'next_run_on' => '2026-10-26',
+            'checklist' => [['text' => 'Review the release notes', 'completed' => true]],
         ]);
 
         $this->artisan('tasks:generate-recurring')

@@ -388,6 +388,21 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
         $this->resetValidation('checklistItems');
     }
 
+    public function saveChecklist(): void
+    {
+        $task = $this->task;
+        abort_if($task === null, 404);
+        $this->authorize('update', $task);
+        $this->trimChecklistItemText();
+        $validated = $this->validate($this->checklistRules());
+
+        $task->update(['checklist' => $validated['checklistItems'] ?? []]);
+        $this->checklistItems = $task->refresh()->checklist ?? [];
+        $this->resetValidation('checklistItems');
+        unset($this->task, $this->activities);
+        $this->dispatch('task-modal-refresh');
+    }
+
     public function deleteTaskTemplate(int $templateId): void
     {
         $project = $this->project;
@@ -798,6 +813,39 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
                         <button type="button" wire:click="editInlineField('description')" class="rich-text-output mt-2 min-h-12 w-full rounded-lg p-2 text-left text-sm leading-6 text-slate-600 hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 dark:text-slate-300 dark:hover:bg-slate-800">{!! \App\Support\RichText::sanitize($this->task->description) ?: '<span class="text-slate-400">Add a description...</span>' !!}</button>
                     @endif
                 </div>
+
+                <section class="mt-6 space-y-3 rounded-lg border border-slate-200 p-4 dark:border-slate-700" aria-label="Task checklist">
+                    <div class="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                            <h2 class="text-sm font-medium text-slate-900 dark:text-slate-200">Checklist <span class="font-normal text-slate-500">(optional, up to 30 items)</span></h2>
+                            @if ($checklistItems !== [])
+                                <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">{{ count(array_filter($checklistItems, fn ($item) => (bool) ($item['completed'] ?? false))) }} of {{ count($checklistItems) }} complete</p>
+                            @endif
+                        </div>
+                        <button type="button" wire:click="addChecklistItem" class="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800">Add item</button>
+                    </div>
+
+                    @error('checklistItems') <p class="text-sm text-red-600 dark:text-red-400">{{ $message }}</p> @enderror
+
+                    @if ($checklistItems !== [])
+                        <ul class="space-y-2">
+                            @foreach ($checklistItems as $index => $item)
+                                <li wire:key="modal-checklist-item-{{ $index }}" class="flex items-start gap-2">
+                                    <input id="modal-checklist-item-{{ $index }}-completed" type="checkbox" wire:model="checklistItems.{{ $index }}.completed" aria-label="Mark checklist item {{ $index + 1 }} complete" class="mt-3 h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-600 dark:border-slate-600 dark:bg-slate-950">
+                                    <div class="min-w-0 flex-1">
+                                        <label for="modal-checklist-item-{{ $index }}-text" class="sr-only">Checklist item {{ $index + 1 }}</label>
+                                        <input id="modal-checklist-item-{{ $index }}-text" type="text" wire:model="checklistItems.{{ $index }}.text" maxlength="180" placeholder="Describe a step" @error("checklistItems.$index.text") aria-invalid="true" @enderror class="block min-h-10 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none focus:border-indigo-600 focus:ring-4 focus:ring-indigo-600/10 dark:border-slate-700 dark:bg-slate-950 dark:text-white">
+                                        @error("checklistItems.$index.text") <p class="mt-1 text-sm text-red-600 dark:text-red-400">{{ $message }}</p> @enderror
+                                    </div>
+                                    <button type="button" wire:click="removeChecklistItem({{ $index }})" aria-label="Remove checklist item {{ $index + 1 }}" class="mt-1 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-slate-500 hover:bg-red-50 hover:text-red-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600 dark:text-slate-400 dark:hover:bg-red-950">×</button>
+                                </li>
+                            @endforeach
+                        </ul>
+                    @endif
+                    <div class="flex justify-end">
+                        <button type="button" wire:click="saveChecklist" wire:loading.attr="disabled" wire:target="saveChecklist" class="inline-flex min-h-10 items-center justify-center rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60">Save checklist</button>
+                    </div>
+                </section>
             </div>
             <div>
     @endif

@@ -77,7 +77,7 @@ class TasksTest extends TestCase
         Livewire::actingAs($user)
             ->test('tasks.form', ['project' => $project->id, 'task' => $task->id, 'modal' => true])
             ->set('checklistItems.0.completed', true)
-            ->call('save')
+            ->call('saveChecklist')
             ->assertHasNoErrors();
 
         $task->refresh();
@@ -119,6 +119,19 @@ class TasksTest extends TestCase
 
         $this->assertDatabaseMissing('tasks', ['title' => 'Invalid checklist']);
         $this->assertDatabaseMissing('tasks', ['title' => 'Too many steps']);
+    }
+
+    public function test_checklist_item_text_is_escaped_in_the_task_form(): void
+    {
+        $user = User::factory()->create();
+        $project = $this->createProject($user);
+        $task = $this->createTask($user, $project, [
+            'checklist' => [['text' => '<script>alert(1)</script>', 'completed' => false]],
+        ]);
+
+        Livewire::actingAs($user)
+            ->test('tasks.form', ['project' => $project->id, 'task' => $task->id, 'modal' => true])
+            ->assertDontSee('<script>alert(1)</script>', false);
     }
 
     public function test_project_owner_can_save_and_apply_a_task_template_without_overwriting_task_specific_fields(): void

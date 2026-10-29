@@ -38,9 +38,16 @@ class Task extends Model
                     continue;
                 }
 
+                $from = $task->activityValue($field, $previous[$field] ?? null);
+                $to = $task->activityValue($field, $changes[$field]);
+
+                if ($field === 'checklist' && $from === $to) {
+                    continue;
+                }
+
                 $details[$field] = [
-                    'from' => $task->activityValue($field, $previous[$field] ?? null),
-                    'to' => $task->activityValue($field, $changes[$field]),
+                    'from' => $from,
+                    'to' => $to,
                 ];
             }
 
