@@ -30,7 +30,7 @@ class Task extends Model
         static::updated(function (Task $task): void {
             $previous = $task->getPrevious();
             $changes = $task->getChanges();
-            $tracked = ['title', 'description', 'project_status_id', 'priority', 'type', 'due_date', 'assignee_id', 'reviewer_id', 'cycle_id', 'story_points', 'blocked_reason', 'github_url'];
+            $tracked = ['title', 'description', 'project_status_id', 'priority', 'type', 'due_date', 'assignee_id', 'reviewer_id', 'cycle_id', 'story_points', 'blocked_reason', 'github_url', 'checklist'];
             $details = [];
 
             foreach ($tracked as $field) {
@@ -81,6 +81,7 @@ class Task extends Model
         'priority',
         'due_date',
         'github_url',
+        'checklist',
     ];
 
     protected function casts(): array
@@ -88,6 +89,7 @@ class Task extends Model
         return [
             'due_date' => 'date',
             'story_points' => 'integer',
+            'checklist' => 'array',
         ];
     }
 
@@ -174,6 +176,7 @@ class Task extends Model
         }
 
         return match ($field) {
+            'checklist' => $this->checklistSummary($value),
             'project_status_id' => ProjectStatus::query()->whereKey($value)->value('name') ?? 'Unknown status',
             'assignee_id' => User::query()->whereKey($value)->value('name') ?? 'Unknown person',
             'reviewer_id' => User::query()->whereKey($value)->value('name') ?? 'Unknown person',
@@ -183,6 +186,24 @@ class Task extends Model
             'due_date' => (string) $value,
             default => (string) $value,
         };
+    }
+
+    private function checklistSummary(mixed $value): string
+    {
+        if (is_string($value)) {
+            $value = json_decode($value, true);
+        }
+
+        if (! is_array($value)) {
+            return '0 checklist items';
+        }
+
+        $completedItems = count(array_filter(
+            $value,
+            fn (mixed $item): bool => is_array($item) && (bool) ($item['completed'] ?? false),
+        ));
+
+        return $completedItems.' of '.count($value).' checklist items complete';
     }
 
     public function isBlocked(): bool

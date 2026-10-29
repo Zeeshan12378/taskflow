@@ -53,6 +53,74 @@ class TasksTest extends TestCase
         ]);
     }
 
+    public function test_task_checklist_items_are_saved_and_completion_changes_are_recorded(): void
+    {
+        $user = User::factory()->create();
+        $project = $this->createProject($user);
+        $status = $project->statuses()->where('name', 'To Do')->firstOrFail();
+        $checklist = [
+            ['text' => 'Confirm the behavior', 'completed' => false],
+            ['text' => 'Review the changes', 'completed' => false],
+        ];
+
+        Livewire::actingAs($user)
+            ->test('tasks.form', ['project' => $project->id])
+            ->set('title', 'Task with checklist')
+            ->set('statusId', (string) $status->id)
+            ->set('checklistItems', $checklist)
+            ->call('save')
+            ->assertHasNoErrors();
+
+        $task = Task::query()->where('title', 'Task with checklist')->firstOrFail();
+        $this->assertSame($checklist, $task->checklist);
+
+        Livewire::actingAs($user)
+            ->test('tasks.form', ['project' => $project->id, 'task' => $task->id, 'modal' => true])
+            ->set('checklistItems.0.completed', true)
+            ->call('save')
+            ->assertHasNoErrors();
+
+        $task->refresh();
+        $this->assertSame([
+            ['text' => 'Confirm the behavior', 'completed' => true],
+            ['text' => 'Review the changes', 'completed' => false],
+        ], $task->checklist);
+        $this->assertSame(
+            [
+                'from' => '0 of 2 checklist items complete',
+                'to' => '1 of 2 checklist items complete',
+            ],
+            $task->activities()->latest()->firstOrFail()->details['checklist'],
+        );
+    }
+
+    public function test_task_checklist_rejects_unexpected_item_keys_and_overlong_lists(): void
+    {
+        $user = User::factory()->create();
+        $project = $this->createProject($user);
+
+        Livewire::actingAs($user)
+            ->test('tasks.form', ['project' => $project->id])
+            ->set('title', 'Invalid checklist')
+            ->set('checklistItems', [[
+                'text' => 'Approved step',
+                'completed' => false,
+                'is_admin' => true,
+            ]])
+            ->call('save')
+            ->assertHasErrors(['checklistItems.0']);
+
+        Livewire::actingAs($user)
+            ->test('tasks.form', ['project' => $project->id])
+            ->set('title', 'Too many steps')
+            ->set('checklistItems', array_fill(0, 31, ['text' => 'Step', 'completed' => false]))
+            ->call('save')
+            ->assertHasErrors(['checklistItems']);
+
+        $this->assertDatabaseMissing('tasks', ['title' => 'Invalid checklist']);
+        $this->assertDatabaseMissing('tasks', ['title' => 'Too many steps']);
+    }
+
     public function test_project_owner_can_save_and_apply_a_task_template_without_overwriting_task_specific_fields(): void
     {
         $user = User::factory()->create();
@@ -67,6 +135,7 @@ class TasksTest extends TestCase
             ->set('type', 'bug')
             ->set('priority', 'high')
             ->set('storyPoints', '8')
+            ->set('checklistItems', [['text' => 'Review the release notes', 'completed' => true]])
             ->call('saveTaskTemplate')
             ->assertHasNoErrors()
             ->assertSee('Task template saved.');
@@ -81,6 +150,9 @@ class TasksTest extends TestCase
             'priority' => 'high',
             'story_points' => 8,
         ]);
+        $this->assertSame([
+            ['text' => 'Review the release notes', 'completed' => false],
+        ], $template->checklist);
 
         Livewire::actingAs($user)
             ->test('tasks.form', ['project' => $project->id])
@@ -94,6 +166,7 @@ class TasksTest extends TestCase
             ->assertSet('type', 'bug')
             ->assertSet('priority', 'high')
             ->assertSet('storyPoints', '8')
+            ->assertSet('checklistItems', [['text' => 'Review the release notes', 'completed' => false]])
             ->assertSet('statusId', (string) $status->id)
             ->assertSet('dueDate', today()->addDays(3)->format('Y-m-d'))
             ->call('save')
@@ -109,6 +182,9 @@ class TasksTest extends TestCase
             'story_points' => 8,
             'due_date' => today()->addDays(3)->startOfDay()->toDateTimeString(),
         ]);
+        $this->assertSame([
+            ['text' => 'Review the release notes', 'completed' => false],
+        ], Task::query()->where('title', 'Run regression tests')->firstOrFail()->checklist);
     }
 
     public function test_project_member_can_apply_but_cannot_manage_project_task_templates(): void

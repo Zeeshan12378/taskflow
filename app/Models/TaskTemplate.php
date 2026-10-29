@@ -16,12 +16,14 @@ class TaskTemplate extends Model
         'type',
         'priority',
         'story_points',
+        'checklist',
     ];
 
     protected function casts(): array
     {
         return [
             'story_points' => 'integer',
+            'checklist' => 'array',
         ];
     }
 

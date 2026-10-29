@@ -55,6 +55,11 @@ class Project extends Model
         return $this->hasMany(TaskTemplate::class)->orderBy('name');
     }
 
+    public function recurringTaskSchedules(): HasMany
+    {
+        return $this->hasMany(RecurringTaskSchedule::class)->orderBy('next_run_on');
+    }
+
     public function team(): BelongsTo
     {
         return $this->belongsTo(Team::class);

@@ -47,6 +47,7 @@ class TaskActivity extends Model
             'story_points' => 'estimate',
             'blocked_reason' => 'blocked reason',
             'github_url' => 'GitHub reference',
+            'checklist' => 'checklist',
         ];
 
         return collect($this->details ?? [])

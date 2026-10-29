@@ -45,11 +45,18 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
 
     public string $storyPoints = '';
 
+    /** @var array<int, array{text: string, completed: bool}> */
+    public array $checklistItems = [];
+
     public string $selectedTaskTemplate = '';
 
     public string $templateName = '';
 
     public string $templateMessage = '';
+
+    public string $recurringTemplateId = '';
+
+    public string $recurringWeekday = '';
 
     public string $commentBody = '';
 
@@ -147,6 +154,12 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
     }
 
     #[Computed]
+    public function recurringTaskSchedules()
+    {
+        return $this->project->recurringTaskSchedules()->get();
+    }
+
+    #[Computed]
     public function activities()
     {
         return $this->task?->activities()->with('actor')->latest()->limit(50)->get() ?? collect();
@@ -220,6 +233,7 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
         $this->reviewerId = (string) ($taskRecord->reviewer_id ?? '');
         $this->cycleId = (string) ($taskRecord->cycle_id ?? '');
         $this->storyPoints = (string) ($taskRecord->story_points ?? '');
+        $this->checklistItems = $taskRecord->checklist ?? [];
     }
 
     public function editInlineField(string $field): void
@@ -294,8 +308,12 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
         $this->type = $template->type;
         $this->priority = $template->priority;
         $this->storyPoints = (string) ($template->story_points ?? '');
+        $this->checklistItems = array_map(
+            fn (array $item): array => ['text' => $item['text'], 'completed' => false],
+            $template->checklist ?? [],
+        );
         $this->templateMessage = 'Template applied. Add task-specific details before saving.';
-        $this->resetValidation(['title', 'description', 'type', 'priority', 'storyPoints', 'selectedTaskTemplate']);
+        $this->resetValidation(['title', 'description', 'type', 'priority', 'storyPoints', 'selectedTaskTemplate', 'checklistItems']);
     }
 
     public function saveTaskTemplate(): void
@@ -306,6 +324,7 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
         $this->templateName = trim($this->templateName);
         $this->title = trim($this->title);
         $this->description = RichText::sanitize($this->description);
+        $this->trimChecklistItemText();
 
         $validated = $this->validate([
             'templateName' => [
@@ -319,6 +338,7 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
             'type' => ['required', Rule::in(Task::TYPES)],
             'priority' => ['required', Rule::in(Task::PRIORITIES)],
             'storyPoints' => ['nullable', 'integer', Rule::in([1, 2, 3, 5, 8, 13, 21])],
+            ...$this->checklistRules(),
         ]);
 
         if (mb_strlen(RichText::plainText($validated['description'] ?? '')) > 5000) {
@@ -335,12 +355,37 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
             'type' => $validated['type'],
             'priority' => $validated['priority'],
             'story_points' => blank($validated['storyPoints'] ?? null) ? null : $validated['storyPoints'],
+            'checklist' => $this->templateChecklist($validated['checklistItems'] ?? []),
         ]);
 
         $this->templateName = '';
         $this->templateMessage = 'Task template saved.';
         $this->resetValidation('templateName');
         unset($this->taskTemplates);
+    }
+
+    public function addChecklistItem(): void
+    {
+        $this->authorizeChecklistChanges();
+
+        if (count($this->checklistItems) >= 30) {
+            $this->addError('checklistItems', 'A checklist may contain no more than 30 items.');
+
+            return;
+        }
+
+        $this->checklistItems[] = ['text' => '', 'completed' => false];
+        $this->resetValidation('checklistItems');
+    }
+
+    public function removeChecklistItem(int $index): void
+    {
+        $this->authorizeChecklistChanges();
+        abort_unless(array_key_exists($index, $this->checklistItems), 404);
+
+        unset($this->checklistItems[$index]);
+        $this->checklistItems = array_values($this->checklistItems);
+        $this->resetValidation('checklistItems');
     }
 
     public function deleteTaskTemplate(int $templateId): void
@@ -350,6 +395,79 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
         $project->taskTemplates()->findOrFail($templateId)->delete();
         $this->templateMessage = 'Task template deleted.';
         unset($this->taskTemplates);
+    }
+
+    public function saveRecurringTaskSchedule(): void
+    {
+        abort_if($this->taskId !== null, 404);
+
+        $project = $this->project;
+        $this->authorize('update', $project);
+        $validated = $this->validate([
+            'recurringTemplateId' => [
+                'required',
+                'integer',
+                Rule::exists('task_templates', 'id')->where('project_id', $project->id),
+            ],
+            'recurringWeekday' => ['required', 'integer', Rule::in(range(0, 6))],
+        ]);
+        $template = $project->taskTemplates()->findOrFail($validated['recurringTemplateId']);
+        $nextRunOn = today()->addDay();
+
+        while ($nextRunOn->dayOfWeek !== (int) $validated['recurringWeekday']) {
+            $nextRunOn->addDay();
+        }
+
+        $project->recurringTaskSchedules()->create([
+            'created_by' => auth()->id(),
+            'template_name' => $template->name,
+            'title' => $template->title,
+            'description' => $template->description,
+            'type' => $template->type,
+            'priority' => $template->priority,
+            'story_points' => $template->story_points,
+            'checklist' => $this->templateChecklist($template->checklist ?? []),
+            'weekday' => $validated['recurringWeekday'],
+            'next_run_on' => $nextRunOn->toDateString(),
+        ]);
+
+        $this->recurringTemplateId = '';
+        $this->recurringWeekday = '';
+        $this->templateMessage = 'Weekly task schedule created.';
+        $this->resetValidation(['recurringTemplateId', 'recurringWeekday']);
+        unset($this->recurringTaskSchedules);
+    }
+
+    public function toggleRecurringTaskSchedule(int $scheduleId): void
+    {
+        $project = $this->project;
+        $this->authorize('update', $project);
+        $schedule = $project->recurringTaskSchedules()->findOrFail($scheduleId);
+        $isActive = ! $schedule->is_active;
+        $attributes = ['is_active' => $isActive];
+
+        if (! $isActive) {
+            $nextRunOn = $schedule->next_run_on->copy();
+
+            while ($nextRunOn->lte(today())) {
+                $nextRunOn->addWeek();
+            }
+
+            $attributes['next_run_on'] = $nextRunOn->toDateString();
+        }
+
+        $schedule->update($attributes);
+        $this->templateMessage = $schedule->is_active ? 'Weekly task schedule resumed.' : 'Weekly task schedule paused.';
+        unset($this->recurringTaskSchedules);
+    }
+
+    public function deleteRecurringTaskSchedule(int $scheduleId): void
+    {
+        $project = $this->project;
+        $this->authorize('update', $project);
+        $project->recurringTaskSchedules()->findOrFail($scheduleId)->delete();
+        $this->templateMessage = 'Weekly task schedule deleted.';
+        unset($this->recurringTaskSchedules);
     }
 
     public function editDetailField(string $field): void
@@ -466,6 +584,7 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
         $this->authorize('view', $project);
         $this->description = RichText::sanitize($this->description);
         $this->blockedReason = trim(RichText::sanitize($this->blockedReason));
+        $this->trimChecklistItemText();
         $statusIsBlocked = strtolower((string) $project->statuses()->whereKey($this->statusId)->value('name')) === 'blocked';
         $targetStatus = $project->statuses()->whereKey($this->statusId)->first();
         $canAssignTeamCycle = $project->team?->members->contains('id', auth()->id()) ?? false;
@@ -485,6 +604,7 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
             'priority' => ['required', Rule::in(Task::PRIORITIES)],
             'type' => ['required', Rule::in(Task::TYPES)],
             'storyPoints' => ['nullable', 'integer', Rule::in([1, 2, 3, 5, 8, 13, 21])],
+            ...$this->checklistRules(),
             'blockedReason' => [$statusIsBlocked ? 'required' : 'nullable', 'string', 'max:10000'],
             'dueDate' => ['nullable', 'date'],
             'githubUrl' => $this->githubUrlRules(),
@@ -521,6 +641,7 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
             'priority' => $validated['priority'],
             'type' => $validated['type'],
             'story_points' => blank($validated['storyPoints'] ?? null) ? null : $validated['storyPoints'],
+            'checklist' => $validated['checklistItems'] ?? [],
             'blocked_reason' => $statusIsBlocked ? $validated['blockedReason'] : null,
             'due_date' => $validated['dueDate'] ?: null,
             'github_url' => $validated['githubUrl'] ?: null,
@@ -573,6 +694,51 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
                 }
             },
         ];
+    }
+
+    /**
+     * @return array<string, array<int, string>>
+     */
+    private function checklistRules(): array
+    {
+        return [
+            'checklistItems' => ['nullable', 'array', 'max:30'],
+            'checklistItems.*' => ['required', 'array:text,completed'],
+            'checklistItems.*.text' => ['required', 'string', 'max:180'],
+            'checklistItems.*.completed' => ['required', 'boolean'],
+        ];
+    }
+
+    private function authorizeChecklistChanges(): void
+    {
+        if ($this->taskId !== null) {
+            $this->authorize('update', $this->task);
+
+            return;
+        }
+
+        $this->authorize('create', [Task::class, $this->project]);
+    }
+
+    private function trimChecklistItemText(): void
+    {
+        foreach ($this->checklistItems as $index => $item) {
+            if (is_array($item) && isset($item['text']) && is_string($item['text'])) {
+                $this->checklistItems[$index]['text'] = trim($item['text']);
+            }
+        }
+    }
+
+    /**
+     * @param array<int, array{text: string, completed?: bool}> $items
+     * @return array<int, array{text: string, completed: bool}>
+     */
+    private function templateChecklist(array $items): array
+    {
+        return array_map(
+            fn (array $item): array => ['text' => $item['text'], 'completed' => false],
+            $items,
+        );
     }
 
     /**
@@ -685,7 +851,7 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
         @can('update', $this->project)
             <section class="space-y-3 rounded-lg border border-slate-200 p-4 dark:border-slate-700" aria-label="Manage project task templates">
                 <div>
-                    <label for="templateName" class="block text-sm font-medium text-slate-900 dark:text-slate-200">Save current task details as a template</label>
+                    <label for="templateName" class="block text-sm font-medium text-slate-900 dark:text-slate-200">Save current task details and checklist as a template</label>
                     <div class="mt-1.5 flex flex-col gap-2 sm:flex-row">
                         <input id="templateName" type="text" wire:model="templateName" maxlength="100" placeholder="Template name" @error('templateName') aria-describedby="template-name-error" aria-invalid="true" @enderror class="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-sm outline-none focus:border-indigo-600 focus:ring-4 focus:ring-indigo-600/10 dark:border-slate-700 dark:bg-slate-950 dark:text-white">
                         <button type="button" wire:click="saveTaskTemplate" class="inline-flex min-h-11 items-center justify-center rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-indigo-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 focus-visible:ring-offset-2">Save template</button>
@@ -703,6 +869,55 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
                     </ul>
                 @endif
             </section>
+
+            @if (! $taskId)
+                <section class="space-y-3 rounded-lg border border-slate-200 p-4 dark:border-slate-700" aria-label="Create weekly task schedule">
+                    <div>
+                        <h2 class="text-sm font-medium text-slate-900 dark:text-slate-200">Create a weekly task schedule</h2>
+                        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">The first task is created on the next selected weekday and gets that date as its due date. Schedules repeat until paused or deleted.</p>
+                    </div>
+                    <div class="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(10rem,0.7fr)_auto]">
+                        <div>
+                            <label for="recurringTemplateId" class="sr-only">Template for recurring tasks</label>
+                            <select id="recurringTemplateId" wire:model="recurringTemplateId" @error('recurringTemplateId') aria-describedby="recurring-template-error" aria-invalid="true" @enderror class="block min-h-11 w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-sm outline-none focus:border-indigo-600 focus:ring-4 focus:ring-indigo-600/10 dark:border-slate-700 dark:bg-slate-950 dark:text-white">
+                                <option value="">Choose a saved template</option>
+                                @foreach ($this->taskTemplates as $template)
+                                    <option value="{{ $template->id }}">{{ $template->name }}</option>
+                                @endforeach
+                            </select>
+                            @error('recurringTemplateId') <p id="recurring-template-error" class="mt-1 text-sm text-red-600 dark:text-red-400">{{ $message }}</p> @enderror
+                        </div>
+                        <div>
+                            <label for="recurringWeekday" class="sr-only">Weekly weekday</label>
+                            <select id="recurringWeekday" wire:model="recurringWeekday" @error('recurringWeekday') aria-describedby="recurring-weekday-error" aria-invalid="true" @enderror class="block min-h-11 w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-sm outline-none focus:border-indigo-600 focus:ring-4 focus:ring-indigo-600/10 dark:border-slate-700 dark:bg-slate-950 dark:text-white">
+                                <option value="">Choose a weekday</option>
+                                @foreach (['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'] as $weekday => $weekdayName)
+                                    <option value="{{ $weekday }}">{{ $weekdayName }}</option>
+                                @endforeach
+                            </select>
+                            @error('recurringWeekday') <p id="recurring-weekday-error" class="mt-1 text-sm text-red-600 dark:text-red-400">{{ $message }}</p> @enderror
+                        </div>
+                        <button type="button" wire:click="saveRecurringTaskSchedule" class="inline-flex min-h-11 items-center justify-center rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-indigo-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 focus-visible:ring-offset-2">Create schedule</button>
+                    </div>
+                </section>
+            @endif
+
+            @if ($this->recurringTaskSchedules->isNotEmpty())
+                <ul class="space-y-2" aria-label="Weekly task schedules">
+                    @foreach ($this->recurringTaskSchedules as $schedule)
+                        <li wire:key="recurring-task-schedule-{{ $schedule->id }}" class="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 px-4 py-3 dark:border-slate-700">
+                            <div>
+                                <p class="text-sm font-medium text-slate-900 dark:text-slate-100">{{ $schedule->template_name }} · Every {{ $schedule->next_run_on->format('l') }}</p>
+                                <p class="text-xs text-slate-500 dark:text-slate-400">{{ $schedule->is_active ? 'Next task: '.$schedule->next_run_on->format('M j, Y') : 'Paused' }}</p>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <button type="button" wire:click="toggleRecurringTaskSchedule({{ $schedule->id }})" class="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800">{{ $schedule->is_active ? 'Pause' : 'Resume' }}</button>
+                                <button type="button" wire:click="deleteRecurringTaskSchedule({{ $schedule->id }})" wire:confirm="Delete this weekly task schedule?" class="rounded-md px-3 py-1.5 text-sm font-medium text-red-600 hover:bg-red-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600 dark:text-red-400 dark:hover:bg-red-950">Delete</button>
+                            </div>
+                        </li>
+                    @endforeach
+                </ul>
+            @endif
         @endcan
 
         @if ($templateMessage !== '')
@@ -815,6 +1030,36 @@ new #[Layout('layouts.app')] #[Title('Task · TaskFlow')] class extends Componen
                 @error('cycleId') <p id="cycle-error" class="mt-1.5 text-sm text-red-600 dark:text-red-400">Choose an active or upcoming sprint available to this project.</p> @enderror
             </div>
         </div>
+
+        <section class="space-y-3 rounded-lg border border-slate-200 p-4 dark:border-slate-700" aria-label="Task checklist">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                    <h2 class="text-sm font-medium text-slate-900 dark:text-slate-200">Checklist <span class="font-normal text-slate-500">(optional, up to 30 items)</span></h2>
+                    @if ($checklistItems !== [])
+                        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">{{ count(array_filter($checklistItems, fn ($item) => (bool) ($item['completed'] ?? false))) }} of {{ count($checklistItems) }} complete</p>
+                    @endif
+                </div>
+                <button type="button" wire:click="addChecklistItem" class="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800">Add item</button>
+            </div>
+
+            @error('checklistItems') <p class="text-sm text-red-600 dark:text-red-400">{{ $message }}</p> @enderror
+
+            @if ($checklistItems !== [])
+                <ul class="space-y-2">
+                    @foreach ($checklistItems as $index => $item)
+                        <li wire:key="checklist-item-{{ $index }}" class="flex items-start gap-2">
+                            <input id="checklist-item-{{ $index }}-completed" type="checkbox" wire:model="checklistItems.{{ $index }}.completed" aria-label="Mark checklist item {{ $index + 1 }} complete" class="mt-3 h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-600 dark:border-slate-600 dark:bg-slate-950">
+                            <div class="min-w-0 flex-1">
+                                <label for="checklist-item-{{ $index }}-text" class="sr-only">Checklist item {{ $index + 1 }}</label>
+                                <input id="checklist-item-{{ $index }}-text" type="text" wire:model="checklistItems.{{ $index }}.text" maxlength="180" placeholder="Describe a step" @error("checklistItems.$index.text") aria-invalid="true" @enderror class="block min-h-10 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none focus:border-indigo-600 focus:ring-4 focus:ring-indigo-600/10 dark:border-slate-700 dark:bg-slate-950 dark:text-white">
+                                @error("checklistItems.$index.text") <p class="mt-1 text-sm text-red-600 dark:text-red-400">{{ $message }}</p> @enderror
+                            </div>
+                            <button type="button" wire:click="removeChecklistItem({{ $index }})" aria-label="Remove checklist item {{ $index + 1 }}" class="mt-1 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-slate-500 hover:bg-red-50 hover:text-red-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600 dark:text-slate-400 dark:hover:bg-red-950">×</button>
+                        </li>
+                    @endforeach
+                </ul>
+            @endif
+        </section>
 
         <div>
             <label class="mb-1.5 block text-sm font-medium text-slate-900 dark:text-slate-200">Blocked reason <span class="font-normal text-slate-500">(required for Blocked status)</span></label>
